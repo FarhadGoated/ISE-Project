@@ -104,6 +104,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\BarcodeFileIO.cpp" />
+    <ClCompile Include="src\BarcodeGenerator.cpp" />
+    <ClCompile Include="src\BarcodeReader.cpp" />
     <ClCompile Include="src\ImageProcessor.cpp" />
     <ClCompile Include="src\InputValidator.cpp" />
     <QtRcc Include="ISEBarcodeProject.qrc" />
@@ -113,6 +116,9 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\BarcodeFileIO.h" />
+    <ClInclude Include="include\BarcodeGenerator.h" />
+    <ClInclude Include="include\BarcodeReader.h" />
     <ClInclude Include="include\BarcodeTypes.h" />
     <ClInclude Include="include\ImageProcessor.h" />
     <ClInclude Include="include\InputValidator.h" />
