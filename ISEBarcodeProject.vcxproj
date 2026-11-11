@@ -109,6 +109,7 @@
     <ClCompile Include="src\BarcodeReader.cpp" />
     <ClCompile Include="src\ImageProcessor.cpp" />
     <ClCompile Include="src\InputValidator.cpp" />
+    <ClCompile Include="src\MainWindow.cpp" />
     <QtRcc Include="ISEBarcodeProject.qrc" />
     <QtUic Include="ISEBarcodeProject.ui" />
     <QtMoc Include="ISEBarcodeProject.h" />
@@ -122,6 +123,7 @@
     <ClInclude Include="include\BarcodeTypes.h" />
     <ClInclude Include="include\ImageProcessor.h" />
     <ClInclude Include="include\InputValidator.h" />
+    <ClInclude Include="include\MainWindow.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

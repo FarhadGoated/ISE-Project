@@ -1,10 +1,11 @@
-#include "ISEBarcodeProject.h"
-#include <QtWidgets/QApplication>
+#include "MainWindow.h"
 
-int main(int argc, char *argv[])
+#include <QApplication>
+
+int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
-    ISEBarcodeProject window;
+    shop::MainWindow window;
     window.show();
     return app.exec();
 }
