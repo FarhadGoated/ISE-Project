@@ -107,6 +107,7 @@
     <ClCompile Include="src\BarcodeFileIO.cpp" />
     <ClCompile Include="src\BarcodeGenerator.cpp" />
     <ClCompile Include="src\BarcodeReader.cpp" />
+    <ClCompile Include="src\Code39Table.cpp" />
     <ClCompile Include="src\ImageProcessor.cpp" />
     <ClCompile Include="src\InputValidator.cpp" />
     <ClCompile Include="src\MainWindow.cpp" />
@@ -121,6 +122,7 @@
     <ClInclude Include="include\BarcodeGenerator.h" />
     <ClInclude Include="include\BarcodeReader.h" />
     <ClInclude Include="include\BarcodeTypes.h" />
+    <ClInclude Include="include\Code39Table.h" />
     <ClInclude Include="include\ImageProcessor.h" />
     <ClInclude Include="include\InputValidator.h" />
     <ClInclude Include="include\MainWindow.h" />
