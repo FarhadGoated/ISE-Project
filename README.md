@@ -1,27 +1,47 @@
-# ISE Project — Barcode Generator and Reader
+# Super Duper Ultra Mega Store
 
-A Windows desktop app built with C++ and Qt Widgets. It generates Code 39 barcodes from six-digit numbers, saves them as PNGs, and reads barcodes from a saved image or a live webcam.
+A Windows desktop point-of-sale application built by RandomKidz for the ISE term project. The app uses a webcam to scan six-digit Code 39 barcodes, look up products, record orders, and generate itemized bills.
+
+## Project increments
+
+- **Increment 1** introduced barcode generation, PNG saving and reading, and webcam scanning. The original version is available under the [`Increment-1` tag](https://github.com/FarhadGoated/ISE-Project/tree/Increment-1).
+- **Increment 2** reuses the webcam scanner and Code 39 decoder for product lookup and checkout. The POS adds quantity and stock checks, bill calculation, and linked order records.
 
 ## Build and run
 
 1. Install Visual Studio with the **Desktop development with C++** workload and the **Qt Visual Studio Tools** extension.
 2. Install **Qt 6.12.0 for MSVC 2022 64-bit** with the **Qt Multimedia** component.
-3. Open `ISEBarcodeProject.slnx`. In the project's Qt settings, select the `6.12.0_msvc2022_64` kit and check that **Multimedia** and **Multimedia Widgets** are enabled.
-4. Select **Debug | x64**, build the solution, and press **F5**.
+3. Open `ISEBarcodeProject.slnx`. In the project’s Qt settings, select the `6.12.0_msvc2022_64` kit and check that **Multimedia** and **Multimedia Widgets** are enabled.
+4. Select **Debug | x64**, build the solution, and press **F5**. A webcam is required for live scanning.
 
 ## Quick demo
 
-1. Enter `123456` and click **Generate**. The app accepts six digits starting with `1`–`9`.
-2. Click **Save PNG** and choose a location.
-3. Click **Read PNG** and open the saved file. The decoded number should be `123456`.
-4. To test the webcam, display that PNG on a phone or print it. Click **Scan Camera** and hold the barcode horizontally in the center of the preview with both white margins visible.
-5. When the app reads the barcode, it displays `123456` and closes the preview. Click **Cancel** to stop scanning at any time.
+1. Open `data/barcodes/123456.png` on a phone or print it with both white margins visible.
+2. Click **Product Lookup** and hold the barcode horizontally in the camera preview. The app should display **Whole Milk**.
+3. Open **New Order → Scan Product**, scan the barcode again, and enter a quantity of `1`. Select the item and click **Description** to review it.
+4. Click **Generate Bill**, enter the customer name, choose **Cash**, and click **Save Bill**. The app displays the itemized bill and writes the checkout records to `data`.
+
+The catalog requires the requested quantity to be below the available stock. Successful checkout deducts the sold quantity.
+
+## Data files
+
+| File | Contents |
+|---|---|
+| `data/Product.txt` | Product IDs, barcodes, descriptions, prices, tax, discounts, stock, and barcode image paths |
+| `data/Order.txt` | Customer and payment information for each saved order |
+| `data/OrderDetail.txt` | Products and quantities associated with each order |
+| `data/Bill.txt` | Itemized billing data, totals, and payment status |
+
+The three checkout files are created on the first successful sale and share the same Order ID for that sale.
 
 ## Team contributions
 
-Team Member: Contribution
-- Farhad   : Built the Qt interface and connected the Generate, Save PNG, Read PNG, and Scan Camera workflows.
-- Anaya    : Implemented the shared Code 39 pattern table and barcode generator.
-- Maryam   : Implemented bar and space extraction for saved images and live camera frames.
-- Shaffay  : Implemented the Code 39 decoder and added relative-width matching for camera scans.
-- Shahzeen : Implemented six-digit input validation, PNG saving and loading, and live webcam capture.
+- **Farhad** — Built the Qt interface and integrated webcam lookup, order entry, and bill display.
+- **Anaya** — Implemented the Code 39 generator and the product catalog parser and lookup.
+- **Maryam** — Implemented barcode image processing and the order quantity and stock checks.
+- **Shaffay** — Implemented Code 39 decoding and the bill calculator.
+- **Shahzeen** — Implemented input validation, PNG file handling, webcam capture, and checkout storage.
+
+## Current scope
+
+The checkout GUI saves completed sales as `paid`. Hold, resume, and archive actions are pending. Use Cash or Card for the demo while the Wallet option is being aligned with checkout storage.
