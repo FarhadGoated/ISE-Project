@@ -6,7 +6,16 @@ A Windows desktop point-of-sale application built by RandomKidz for the ISE term
 
 - **Increment 1** introduced barcode generation, PNG saving and reading, and webcam scanning. The original version is available under the [`Increment-1` tag](https://github.com/FarhadGoated/ISE-Project/tree/Increment-1).
 - **Increment 2** reuses the webcam scanner and Code 39 decoder for product lookup and checkout. The POS adds quantity and stock checks, bill calculation, and linked order records.
+## Software engineering practices
 
+- **Incremental development** — We built and tested barcode generation and reading in Increment 1. Increment 2 uses the same scanner and decoder to look up products, record orders, and generate bills. The `Increment-1` tag preserves the earlier version for comparison.
+- **Separation of concerns** — The Qt interface handles user interaction. `ProductCatalog` loads products, `Order` validates quantities and stock, `BillCalculator` calculates totals, and `CheckoutStorage` saves the records.
+- **Abstraction and low coupling** — The GUI calls shared module interfaces. For example, it can look up a product by barcode without knowing how `Product.txt` is parsed.
+- **Reuse and simplicity** — Product Lookup and Scan Product share one camera workflow. The bill screen and file writer use the same calculated bill, so totals are calculated in one place.
+- **Validation and error handling** — The app validates barcode input and stock limits, reports file errors, and keeps the cart open when a checkout save fails.
+- **Traceability** — `Order.txt`, `OrderDetail.txt`, and `Bill.txt` share an Order ID, linking each bill to its order and items.
+- **Version control and documentation** — Feature branches and pull requests track team contributions. The README and implementation guides document setup, module interfaces, and the demo workflow.
+  
 ## Build and run
 
 1. Install Visual Studio with the **Desktop development with C++** workload and the **Qt Visual Studio Tools** extension.
@@ -33,6 +42,11 @@ The catalog requires the requested quantity to be below the available stock. Suc
 | `data/Bill.txt` | Itemized billing data, totals, and payment status |
 
 The three checkout files are created on the first successful sale and share the same Order ID for that sale.
+
+## Software engineering principles
+
+- **Incremental development** — Increment 1 delivered barcode generation and reading. Increment 2 built on that foundation with product lookup, order entry, billing, and stock updates. The `Increment-1` tag preserves the first version for comparison.
+- **Separation of concerns** — `MainWindow` handles user interaction, `ProductCatalog` loads product data, `Order` checks quantities,
 
 ## Team contributions
 
