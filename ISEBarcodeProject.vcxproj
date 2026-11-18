@@ -37,12 +37,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>6.12.0_msvc2022_64</QtInstall>
-    <QtModules>core;gui;widgets</QtModules>
+    <QtModules>core;gui;widgets;multimedia;multimediawidgets</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>6.12.0_msvc2022_64</QtInstall>
-    <QtModules>core;gui;widgets</QtModules>
+    <QtModules>core;gui;widgets;multimedia;multimediawidgets</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -107,6 +107,7 @@
     <ClCompile Include="src\BarcodeFileIO.cpp" />
     <ClCompile Include="src\BarcodeGenerator.cpp" />
     <ClCompile Include="src\BarcodeReader.cpp" />
+    <ClCompile Include="src\CameraCapture.cpp" />
     <ClCompile Include="src\Code39Table.cpp" />
     <ClCompile Include="src\ImageProcessor.cpp" />
     <ClCompile Include="src\InputValidator.cpp" />
@@ -122,6 +123,7 @@
     <ClInclude Include="include\BarcodeGenerator.h" />
     <ClInclude Include="include\BarcodeReader.h" />
     <ClInclude Include="include\BarcodeTypes.h" />
+    <QtMoc Include="include\CameraCapture.h" />
     <ClInclude Include="include\Code39Table.h" />
     <ClInclude Include="include\ImageProcessor.h" />
     <ClInclude Include="include\InputValidator.h" />

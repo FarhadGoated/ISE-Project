@@ -4,6 +4,8 @@
 
 #include <QChar>
 #include <QLatin1Char>
+#include <algorithm>
+#include <array>
 
 namespace shop {
 
@@ -39,32 +41,37 @@ namespace shop {
             }
         }
 
-        const int narrowPx = runs[9].widthPx;
-        const long long widePx = 3LL * narrowPx;
-
         QString candidate;
 
         for (int symbolIndex = 0; symbolIndex < 8; ++symbolIndex) {
             const int base = symbolIndex * 10;
-            QString pattern;
 
+            std::array<int, 9> widths{};
             for (int i = 0; i < 9; ++i) {
-                const int widthPx = runs[base + i].widthPx;
-                if (widthPx == narrowPx) {
-                    pattern.append(QLatin1Char('n'));
-                }
-                else if (static_cast<long long>(widthPx) == widePx) {
-                    pattern.append(QLatin1Char('w'));
-                }
-                else {
-                    return fail(error, QStringLiteral("No readable barcode: bar widths do not match the expected ratio."));
-                }
+                widths[i] = runs[base + i].widthPx;
+            }
+            std::sort(widths.begin(), widths.end());
+
+            const int maxNarrow = widths[5];
+            const int minWide = widths[6];
+            if (2LL * minWide < 3LL * maxNarrow
+                || maxNarrow > 2LL * widths.front()
+                || widths.back() > 2LL * minWide) {
+                return fail(error, QStringLiteral("Unclear barcode run widths."));
+            }
+
+            QString pattern;
+            for (int i = 0; i < 9; ++i) {
+                const bool wide = runs[base + i].widthPx > maxNarrow;
+                pattern.append(QLatin1Char(wide ? 'w' : 'n'));
             }
 
             if (symbolIndex < 7) {
                 const Run& gap = runs[base + 9];
-                if (gap.isBlack || gap.widthPx != narrowPx) {
-                    return fail(error, QStringLiteral("No readable barcode: invalid gap between symbols."));
+                const int typicalNarrow = widths[2];
+                if (gap.isBlack || 2LL * gap.widthPx < typicalNarrow
+                    || gap.widthPx > 2LL * typicalNarrow) {
+                    return fail(error, QStringLiteral("Invalid gap between symbols."));
                 }
             }
 
