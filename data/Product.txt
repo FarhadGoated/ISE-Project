@@ -1,0 +1,2 @@
+P001 123456 MILK "Whole Milk" count 200.00 10.00 5.00 10 barcodes/123456.png #
+P002 987654 RICE "White Rice" weight 300.00 20.00 10.00 5.000 barcodes/987654.png #
