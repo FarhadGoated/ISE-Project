@@ -1,10 +1,9 @@
+// Product.h  (shared declaration - do not change without telling the team)
 #pragma once
 #include <QtGlobal>
 #include <QString>
-
 namespace shop {
 enum class Unit { Count, Weight };
-
 struct Product {
     QString id, barcode, acronym, name;
     Unit unit = Unit::Count;
