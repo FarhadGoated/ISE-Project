@@ -17,6 +17,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -24,12 +25,16 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
 #include <QRect>
+#include <QSaveFile>
 #include <QString>
 #include <QStringList>
 #include <QTableWidget>
@@ -196,7 +201,8 @@ namespace shop {
             dialog.exec();
         }
 
-        bool lookupProduct(QWidget* parent, const QString& dataDir, Product& product)
+        bool lookupProduct(QWidget* parent, const QString& dataDir, Product& product,
+            bool manual = false)
         {
             ProductCatalog catalog;
             QString error;
@@ -207,9 +213,24 @@ namespace shop {
                 return false;
             }
 
-            const QString barcode = scanBarcode(parent);
-            if (barcode.isEmpty()) {
-                return false;
+            QString barcode;
+            if (manual) {
+                bool accepted = false;
+                barcode = QInputDialog::getText(parent, QStringLiteral("Enter Barcode"),
+                    QStringLiteral("Six-digit barcode"), QLineEdit::Normal, {}, &accepted).trimmed();
+                if (!accepted) {
+                    return false;
+                }
+                if (!InputValidator::isValidSixDigitNumber(barcode, &error)) {
+                    QMessageBox::warning(parent, QStringLiteral("Enter Barcode"), error);
+                    return false;
+                }
+            }
+            else {
+                barcode = scanBarcode(parent);
+                if (barcode.isEmpty()) {
+                    return false;
+                }
             }
             if (!catalog.findByBarcode(barcode, product)) {
                 QMessageBox::warning(parent, QStringLiteral("Product Lookup"),
@@ -346,19 +367,108 @@ namespace shop {
             dialog.exec();
         }
 
-        void recordOrder(QWidget* parent, const QString& dataDir, QPushButton* startOrderButton)
+        QString heldOrderPath(const QString& dataDir)
+        {
+            return QDir(dataDir).filePath(QStringLiteral("HeldOrder.json"));
+        }
+
+        bool holdOrder(const QString& path, const Order& order, QString& error)
+        {
+            if (QFileInfo::exists(path)) {
+                error = QStringLiteral("Resume the existing held order before holding another.");
+                return false;
+            }
+
+            QJsonArray items;
+            for (const OrderItem& item : order.items()) {
+                items.append(QJsonObject{
+                    { QStringLiteral("id"), item.product.id },
+                    { QStringLiteral("barcode"), item.product.barcode },
+                    { QStringLiteral("quantityMilli"), QString::number(item.quantityMilli) }
+                    });
+            }
+            const QJsonDocument document(QJsonObject{
+                { QStringLiteral("status"), QStringLiteral("on-hold") },
+                { QStringLiteral("items"), items }
+                });
+            const QByteArray bytes = document.toJson();
+            QSaveFile file(path);
+            if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+                error = file.errorString();
+                return false;
+            }
+            return true;
+        }
+
+        bool resumeOrder(const QString& dataDir, Order& order, QString& error)
+        {
+            QFile file(heldOrderPath(dataDir));
+            if (!file.open(QIODevice::ReadOnly)) {
+                error = file.errorString();
+                return false;
+            }
+            const QJsonObject draft = QJsonDocument::fromJson(file.readAll()).object();
+            file.close();
+            const QJsonArray items = draft.value(QStringLiteral("items")).toArray();
+            if (draft.value(QStringLiteral("status")).toString() != QStringLiteral("on-hold")
+                || items.isEmpty()) {
+                error = QStringLiteral("The held order file is invalid.");
+                return false;
+            }
+
+            ProductCatalog catalog;
+            if (!catalog.load(QDir(dataDir).filePath(QStringLiteral("Product.txt")), &error)) {
+                return false;
+            }
+            Order restored;
+            for (const QJsonValue& value : items) {
+                const QJsonObject item = value.toObject();
+                const QString barcode = item.value(QStringLiteral("barcode")).toString();
+                bool quantityOk = false;
+                const qint64 quantity = item.value(QStringLiteral("quantityMilli"))
+                    .toString().toLongLong(&quantityOk);
+                Product product;
+                if (!quantityOk || !catalog.findByBarcode(barcode, product)
+                    || product.id != item.value(QStringLiteral("id")).toString()) {
+                    error = QStringLiteral("Could not restore held product %1.").arg(barcode);
+                    return false;
+                }
+                if (!restored.add(product, quantity, &error)) {
+                    return false;
+                }
+            }
+
+            if (!file.remove()) {
+                error = file.errorString();
+                return false;
+            }
+            order = restored;
+            return true;
+        }
+
+        void recordOrder(QWidget* parent, const QString& dataDir, QPushButton* startOrderButton,
+            bool resumeHeld = false)
         {
             Order order;
+            if (resumeHeld) {
+                QString error;
+                if (!resumeOrder(dataDir, order, error)) {
+                    QMessageBox::warning(parent, QStringLiteral("Resume Held Order"), error);
+                    return;
+                }
+            }
             QDialog dialog(parent);
             dialog.setWindowTitle(QStringLiteral("New Order"));
             dialog.resize(760, 430);
             auto* layout = new QVBoxLayout(&dialog);
             auto* controls = new QHBoxLayout;
             auto* scan = new QPushButton(QStringLiteral("Scan Product"), &dialog);
+            auto* enter = new QPushButton(QStringLiteral("Enter Barcode"), &dialog);
             auto* description = new QPushButton(QStringLiteral("Description"), &dialog);
             auto* edit = new QPushButton(QStringLiteral("Edit Quantity"), &dialog);
             auto* remove = new QPushButton(QStringLiteral("Remove Item"), &dialog);
             controls->addWidget(scan);
+            controls->addWidget(enter);
             controls->addWidget(description);
             controls->addWidget(edit);
             controls->addWidget(remove);
@@ -369,6 +479,7 @@ namespace shop {
             layout->addWidget(table);
             auto* actions = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
             auto* generate = actions->addButton(QStringLiteral("Generate Bill"), QDialogButtonBox::ActionRole);
+            auto* hold = actions->addButton(QStringLiteral("Hold Order"), QDialogButtonBox::ActionRole);
             layout->addWidget(actions);
 
             const auto updateButtons = [&] {
@@ -387,6 +498,7 @@ namespace shop {
                     table->selectRow(0);
                 }
                 generate->setEnabled(startOrderButton->isEnabled() && !order.items().isEmpty());
+                hold->setEnabled(!order.items().isEmpty());
                 updateButtons();
                 };
             const auto selectedItem = [&]() -> const OrderItem* {
@@ -396,9 +508,9 @@ namespace shop {
             QObject::connect(table, &QTableWidget::currentCellChanged, &dialog,
                 [&](int, int, int, int) { updateButtons(); });
             QObject::connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            QObject::connect(scan, &QPushButton::clicked, &dialog, [&] {
+            const auto addProduct = [&](bool manual) {
                 Product product;
-                if (!lookupProduct(&dialog, dataDir, product)) {
+                if (!lookupProduct(&dialog, dataDir, product, manual)) {
                     return;
                 }
                 const qint64 quantity = requestQuantity(&dialog, product, 1000);
@@ -412,6 +524,16 @@ namespace shop {
                     return;
                 }
                 refresh();
+                };
+            QObject::connect(scan, &QPushButton::clicked, &dialog, [&] { addProduct(false); });
+            QObject::connect(enter, &QPushButton::clicked, &dialog, [&] { addProduct(true); });
+            QObject::connect(hold, &QPushButton::clicked, &dialog, [&] {
+                QString error;
+                if (!holdOrder(heldOrderPath(dataDir), order, error)) {
+                    QMessageBox::warning(&dialog, QStringLiteral("Hold Order"), error);
+                    return;
+                }
+                dialog.accept();
                 });
             QObject::connect(description, &QPushButton::clicked, &dialog, [&] {
                 if (const auto* item = selectedItem()) {
@@ -480,7 +602,7 @@ namespace shop {
     MainWindow::MainWindow(QWidget* parent)
         : QMainWindow(parent)
     {
-        setWindowTitle(QStringLiteral("RandomKidz Point of Sale"));
+        setWindowTitle(QStringLiteral("Super Duper Ultra Mega Store"));
         resize(850, 520);
 
         auto* content = new QWidget(this);
@@ -547,6 +669,7 @@ namespace shop {
         auto* scanButton = new QPushButton(QStringLiteral("Scan Camera"), content);
         auto* lookupButton = new QPushButton(QStringLiteral("Product Lookup"), content);
         auto* orderButton = new QPushButton(QStringLiteral("New Order"), content);
+        auto* resumeButton = new QPushButton(QStringLiteral("Resume Held Order"), content);
         orderButton->setObjectName(QStringLiteral("newOrder"));
         lookupButton->setObjectName(QStringLiteral("productLookup"));
         orderButton->setMinimumHeight(46);
@@ -566,13 +689,14 @@ namespace shop {
         decodedOutput->setReadOnly(true);
         decodedLabel->setBuddy(decodedOutput);
 
-        auto* title = new QLabel(QStringLiteral("RandomKidz Point of Sale"), content);
+        auto* title = new QLabel(QStringLiteral("Super Duper Ultra Mega Store"), content);
         title->setObjectName(QStringLiteral("posTitle"));
         layout->addWidget(title);
         auto* posActions = new QHBoxLayout;
         posActions->setSpacing(10);
         posActions->addWidget(orderButton);
         posActions->addWidget(lookupButton);
+        posActions->addWidget(resumeButton);
         posActions->addStretch();
         layout->addLayout(posActions);
 
@@ -706,6 +830,23 @@ namespace shop {
             if (!dataDir.isEmpty()) {
                 recordOrder(this, dataDir, orderButton);
             }
+            });
+        connect(resumeButton, &QPushButton::clicked, this, [this, orderButton, dataDirectory] {
+            const QString dataDir = dataDirectory();
+            if (dataDir.isEmpty()) {
+                return;
+            }
+            if (!orderButton->isEnabled()) {
+                QMessageBox::warning(this, QStringLiteral("Resume Held Order"),
+                    QStringLiteral("Check the saved checkout files before restarting the app."));
+                return;
+            }
+            if (!QFileInfo::exists(heldOrderPath(dataDir))) {
+                QMessageBox::information(this, QStringLiteral("Resume Held Order"),
+                    QStringLiteral("There is no held order to resume."));
+                return;
+            }
+            recordOrder(this, dataDir, orderButton, true);
             });
         connect(scanButton, &QPushButton::clicked, this, [this, decodedOutput] {
             const QString digits = scanBarcode(this);
