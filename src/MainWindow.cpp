@@ -23,6 +23,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -34,6 +35,8 @@
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QSaveFile>
 #include <QString>
 #include <QStringList>
@@ -42,6 +45,8 @@
 #include <QWidget>
 
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <vector>
 
 namespace shop {
@@ -87,43 +92,132 @@ namespace shop {
         {
             QDialog dialog(parent);
             dialog.setWindowTitle(QStringLiteral("Product Description"));
-            auto* form = new QFormLayout(&dialog);
+            dialog.resize(740, 350);
+            dialog.setStyleSheet(QStringLiteral(
+                "QLabel[productMetric=\"true\"] { font-size: 23px; font-weight: 700; }"));
+            auto* layout = new QVBoxLayout(&dialog);
+            layout->setContentsMargins(20, 18, 20, 16);
+            layout->setSpacing(14);
 
-            const auto addField = [&](const QString& label, const QString& value) {
-                auto* field = new QLabel(&dialog);
-                field->setTextFormat(Qt::PlainText);
-                field->setText(value);
-                field->setWordWrap(true);
-                form->addRow(label, field);
+            auto* identity = new QVBoxLayout;
+            identity->setSpacing(4);
+            auto* name = new QLabel(&dialog);
+            name->setObjectName(QStringLiteral("pageTitle"));
+            name->setTextFormat(Qt::PlainText);
+            name->setText(product.name);
+            name->setWordWrap(true);
+            auto* reference = new QLabel(&dialog);
+            reference->setTextFormat(Qt::PlainText);
+            reference->setText(QStringLiteral("Product ID %1  \u00b7  Acronym %2").arg(product.id, product.acronym));
+            reference->setProperty("muted", true);
+            reference->setWordWrap(true);
+            identity->addWidget(name);
+            identity->addWidget(reference);
+            layout->addLayout(identity);
+
+            auto* body = new QHBoxLayout;
+            body->setSpacing(14);
+            auto* productDetails = new QVBoxLayout;
+            productDetails->setSpacing(10);
+            auto* metrics = new QHBoxLayout;
+            metrics->setSpacing(10);
+            const auto addMetric = [&](const QString& label, const QString& value) {
+                auto* card = new QFrame(&dialog);
+                card->setProperty("panel", true);
+                auto* cardLayout = new QVBoxLayout(card);
+                cardLayout->setContentsMargins(13, 10, 13, 10);
+                cardLayout->setSpacing(4);
+                auto* caption = new QLabel(label, card);
+                caption->setProperty("muted", true);
+                auto* amount = new QLabel(value, card);
+                amount->setProperty("productMetric", true);
+                amount->setWordWrap(true);
+                cardLayout->addWidget(caption);
+                cardLayout->addWidget(amount);
+                metrics->addWidget(card, 1);
                 };
+            const bool counted = product.unit == Unit::Count;
+            const QString stock = quantityText(product, product.stockMilli);
+            addMetric(counted ? QStringLiteral("Price per unit") : QStringLiteral("Price per kg"),
+                money(product.pricePaisa));
+            addMetric(QStringLiteral("Available quantity"), counted
+                ? QStringLiteral("%1 %2").arg(stock,
+                    product.stockMilli == 1000 ? QStringLiteral("unit") : QStringLiteral("units"))
+                : stock);
+            productDetails->addLayout(metrics);
 
-            addField(QStringLiteral("Product ID"), product.id);
-            addField(QStringLiteral("Barcode"), product.barcode);
-            addField(QStringLiteral("Acronym"), product.acronym);
-            addField(QStringLiteral("Name"), product.name);
-            addField(QStringLiteral("Measurement unit"),
-                product.unit == Unit::Count ? QStringLiteral("Count") : QStringLiteral("Weight (kg)"));
-            addField(QStringLiteral("Price per unit"), money(product.pricePaisa));
-            addField(QStringLiteral("Tax per unit"), money(product.taxPaisa));
-            addField(QStringLiteral("Discount per unit"), money(product.discountPaisa));
-            addField(QStringLiteral("Available quantity"), quantityText(product, product.stockMilli));
-            addField(QStringLiteral("Barcode path"), product.barcodePath);
+            auto* detailsPanel = new QFrame(&dialog);
+            detailsPanel->setProperty("panel", true);
+            auto* details = new QFormLayout(detailsPanel);
+            details->setContentsMargins(13, 11, 13, 11);
+            details->setVerticalSpacing(8);
+            const auto addDetail = [&](const QString& label, const QString& value) {
+                auto* caption = new QLabel(label, detailsPanel);
+                caption->setProperty("muted", true);
+                auto* field = new QLabel(value, detailsPanel);
+                field->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                details->addRow(caption, field);
+                };
+            addDetail(QStringLiteral("Measurement unit"),
+                counted ? QStringLiteral("Count") : QStringLiteral("Weight (kg)"));
+            addDetail(counted ? QStringLiteral("Tax per unit") : QStringLiteral("Tax per kg"),
+                money(product.taxPaisa));
+            addDetail(counted ? QStringLiteral("Discount per unit") : QStringLiteral("Discount per kg"),
+                money(product.discountPaisa));
+            productDetails->addWidget(detailsPanel, 1);
+            body->addLayout(productDetails, 3);
 
+            auto* barcodePanel = new QFrame(&dialog);
+            barcodePanel->setProperty("panel", true);
+            auto* barcodeLayout = new QVBoxLayout(barcodePanel);
+            barcodeLayout->setContentsMargins(13, 11, 13, 11);
+            barcodeLayout->setSpacing(8);
+            auto* barcodeHeader = new QHBoxLayout;
+            auto* barcodeTitle = new QLabel(QStringLiteral("Barcode"), barcodePanel);
+            barcodeTitle->setProperty("heading", true);
+            auto* digits = new QLabel(barcodePanel);
+            digits->setTextFormat(Qt::PlainText);
+            digits->setText(product.barcode);
+            digits->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            barcodeHeader->addWidget(barcodeTitle);
+            barcodeHeader->addStretch();
+            barcodeHeader->addWidget(digits);
+            barcodeLayout->addLayout(barcodeHeader);
+
+            auto* preview = new QLabel(barcodePanel);
+            preview->setObjectName(QStringLiteral("barcodePreview"));
+            preview->setAlignment(Qt::AlignCenter);
+            preview->setMinimumSize(220, 150);
             const QPixmap barcode(QDir(dataDir).absoluteFilePath(product.barcodePath));
-            if (!barcode.isNull()) {
-                auto* image = new QLabel(&dialog);
-                image->setPixmap(barcode.scaled(441, 140, Qt::KeepAspectRatio));
-                form->addRow(image);
+            if (barcode.isNull()) {
+                preview->setText(QStringLiteral("Barcode image unavailable"));
             }
+            else {
+                preview->setPixmap(barcode.scaled(barcode.size().boundedTo(QSize(236, 144)),
+                    Qt::KeepAspectRatio));
+            }
+            barcodeLayout->addWidget(preview, 1);
+            if (!product.barcodePath.isEmpty()) {
+                auto* path = new QLabel(barcodePanel);
+                path->setTextFormat(Qt::PlainText);
+                path->setText(product.barcodePath);
+                path->setAccessibleName(QStringLiteral("Barcode image path"));
+                path->setProperty("muted", true);
+                path->setWordWrap(true);
+                path->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                barcodeLayout->addWidget(path);
+            }
+            body->addWidget(barcodePanel, 2);
+            layout->addLayout(body, 1);
 
             auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-            form->addRow(buttons);
+            layout->addWidget(buttons);
             QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
             dialog.exec();
         }
 
         bool lookupProduct(QWidget* parent, const QString& dataDir, Product& product,
-            bool manual = false, QString barcode = {})
+            QString barcode = {})
         {
             ProductCatalog catalog;
             QString error;
@@ -134,19 +228,7 @@ namespace shop {
                 return false;
             }
 
-            if (manual) {
-                bool accepted = false;
-                barcode = QInputDialog::getText(parent, QStringLiteral("Enter Barcode"),
-                    QStringLiteral("Six-digit barcode"), QLineEdit::Normal, {}, &accepted).trimmed();
-                if (!accepted) {
-                    return false;
-                }
-                if (!InputValidator::isValidSixDigitNumber(barcode, &error)) {
-                    QMessageBox::warning(parent, QStringLiteral("Enter Barcode"), error);
-                    return false;
-                }
-            }
-            else if (barcode.isEmpty()) {
+            if (barcode.isEmpty()) {
                 barcode = scanProductBarcode(parent);
                 if (barcode.isEmpty()) {
                     return false;
@@ -378,59 +460,198 @@ namespace shop {
                 }
             }
             QDialog dialog(parent);
-            dialog.setWindowTitle(QStringLiteral("New Order"));
-            dialog.resize(760, 430);
+            const QString title = resumeHeld ? QStringLiteral("Resume Held Order") : QStringLiteral("New Order");
+            dialog.setWindowTitle(title);
+            dialog.resize(960, 560);
             auto* layout = new QVBoxLayout(&dialog);
-            auto* controls = new QHBoxLayout;
-            auto* scan = new QPushButton(QStringLiteral("Scan Product"), &dialog);
-            auto* enter = new QPushButton(QStringLiteral("Enter Barcode"), &dialog);
-            auto* description = new QPushButton(QStringLiteral("Description"), &dialog);
-            auto* edit = new QPushButton(QStringLiteral("Edit Quantity"), &dialog);
-            auto* remove = new QPushButton(QStringLiteral("Remove Item"), &dialog);
+            layout->setContentsMargins(24, 20, 24, 20);
+            layout->setSpacing(14);
+            auto* heading = new QLabel(title, &dialog);
+            heading->setObjectName(QStringLiteral("pageTitle"));
+            layout->addWidget(heading);
+
+            auto* scanPanel = new QFrame(&dialog);
+            scanPanel->setProperty("panel", true);
+            auto* controls = new QHBoxLayout(scanPanel);
+            controls->setContentsMargins(14, 12, 14, 12);
+            auto* scan = new QPushButton(QStringLiteral("Scan Product"), scanPanel);
+            scan->setProperty("role", "primary");
+            scan->setAutoDefault(false);
+            auto* barcode = new QLineEdit(scanPanel);
+            barcode->setObjectName(QStringLiteral("orderBarcode"));
+            barcode->setPlaceholderText(QStringLiteral("e.g. 123456"));
+            barcode->setValidator(new QRegularExpressionValidator(
+                QRegularExpression(QStringLiteral("[1-9][0-9]{5}")), barcode));
+            auto* barcodeLabel = new QLabel(QStringLiteral("&Enter barcode"), scanPanel);
+            barcodeLabel->setBuddy(barcode);
+            auto* enter = new QPushButton(QStringLiteral("Add Product"), scanPanel);
+            enter->setAutoDefault(false);
+            enter->setEnabled(false);
             controls->addWidget(scan);
+            controls->addSpacing(12);
+            controls->addWidget(barcodeLabel);
+            controls->addWidget(barcode, 1);
             controls->addWidget(enter);
-            controls->addWidget(description);
-            controls->addWidget(edit);
-            controls->addWidget(remove);
-            layout->addLayout(controls);
+            layout->addWidget(scanPanel);
 
-            auto* table = makeTable(&dialog, { QStringLiteral("Product"), QStringLiteral("Barcode"),
-                QStringLiteral("Quantity"), QStringLiteral("Unit price") });
-            layout->addWidget(table);
-            auto* actions = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-            auto* generate = actions->addButton(QStringLiteral("Generate Bill"), QDialogButtonBox::ActionRole);
-            auto* hold = actions->addButton(QStringLiteral("Hold Order"), QDialogButtonBox::ActionRole);
-            layout->addWidget(actions);
+            auto* cartHeading = new QLabel(&dialog);
+            cartHeading->setProperty("heading", true);
+            layout->addWidget(cartHeading);
+            auto* table = makeTable(&dialog, { QStringLiteral("Product"), QStringLiteral("Unit price"),
+                QStringLiteral("Quantity"), QStringLiteral("Line total"), QStringLiteral(""),
+                QStringLiteral("") });
+            table->setAlternatingRowColors(true);
+            table->verticalHeader()->setDefaultSectionSize(43);
+            table->horizontalHeader()->setStretchLastSection(false);
+            table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+            table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+            table->setColumnWidth(2, 192);
+            table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
+            table->setColumnWidth(4, 112);
+            table->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
+            table->setColumnWidth(5, 87);
+            layout->addWidget(table, 1);
 
-            const auto updateButtons = [&] {
-                const bool selected = table->currentRow() >= 0;
-                description->setEnabled(selected);
-                edit->setEnabled(selected);
-                remove->setEnabled(selected);
+            auto* checkoutPanel = new QFrame(&dialog);
+            checkoutPanel->setProperty("panel", true);
+            auto* checkout = new QHBoxLayout(checkoutPanel);
+            checkout->setContentsMargins(14, 12, 14, 12);
+            auto* close = new QPushButton(QStringLiteral("Close"), checkoutPanel);
+            auto* hold = new QPushButton(QStringLiteral("Hold Order"), checkoutPanel);
+            auto* generate = new QPushButton(QStringLiteral("Generate Bill"), checkoutPanel);
+            generate->setProperty("role", "primary");
+            for (auto* button : { close, hold, generate }) {
+                button->setAutoDefault(false);
+                checkout->addWidget(button);
+            }
+            checkout->addStretch();
+            auto* totals = new QGridLayout;
+            totals->setHorizontalSpacing(16);
+            auto* subtotal = new QLabel(checkoutPanel);
+            auto* tax = new QLabel(checkoutPanel);
+            auto* discount = new QLabel(checkoutPanel);
+            auto* payable = new QLabel(checkoutPanel);
+            payable->setObjectName(QStringLiteral("payableAmount"));
+            const auto addTotal = [&](int row, const QString& label, QLabel* amount) {
+                auto* caption = new QLabel(label, checkoutPanel);
+                caption->setProperty("muted", true);
+                amount->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                totals->addWidget(caption, row, 0);
+                totals->addWidget(amount, row, 1);
                 };
-            const auto refresh = [&] {
+            addTotal(0, QStringLiteral("Subtotal"), subtotal);
+            addTotal(1, QStringLiteral("Tax"), tax);
+            addTotal(2, QStringLiteral("Discount"), discount);
+            addTotal(3, QStringLiteral("Estimated payable"), payable);
+            checkout->addLayout(totals);
+            layout->addWidget(checkoutPanel);
+
+            const auto refreshTotals = [&] {
+                Bill estimate;
+                const bool hasEstimate = !order.items().isEmpty()
+                    && BillCalculator::calculate(order, estimate);
+                const auto displayAmount = [&](qint64 amount) {
+                    return hasEstimate || order.items().isEmpty() ? money(amount) : QStringLiteral("\u2014");
+                    };
+                for (int row = 0; row < table->rowCount(); ++row) {
+                    table->item(row, 3)->setText(hasEstimate
+                        ? money(estimate.lines.at(row).amounts.payablePaisa) : QStringLiteral("\u2014"));
+                }
+                subtotal->setText(displayAmount(estimate.totals.subtotalPaisa));
+                tax->setText(displayAmount(estimate.totals.taxPaisa));
+                discount->setText(displayAmount(estimate.totals.discountPaisa));
+                payable->setText(displayAmount(estimate.totals.payablePaisa));
+                };
+
+            std::function<void()> refresh;
+            refresh = [&] {
                 table->setRowCount(0);
                 for (const OrderItem& item : order.items()) {
-                    addTableRow(table, { item.product.name, item.product.barcode,
-                        quantityText(item.product, item.quantityMilli), money(item.product.pricePaisa) });
+                    const int row = table->rowCount();
+                    addTableRow(table, { item.product.name, money(item.product.pricePaisa),{},{} });
+                    table->item(row, 0)->setToolTip(item.product.barcode);
+
+                    auto* quantityControls = new QWidget(table);
+                    auto* quantityLayout = new QHBoxLayout(quantityControls);
+                    quantityLayout->setContentsMargins(3, 0, 3, 0);
+                    quantityLayout->setSpacing(0);
+                    auto* less = new QPushButton(QStringLiteral("\u2212"), quantityControls);
+                    auto* quantity = new QPushButton(quantityControls);
+                    auto* more = new QPushButton(QStringLiteral("+"), quantityControls);
+                    for (auto* button : { less, quantity, more }) {
+                        button->setProperty("role", "row");
+                        button->setAutoDefault(false);
+                    }
+                    less->setFixedWidth(36);
+                    more->setFixedWidth(36);
+                    less->setAccessibleName(QStringLiteral("Decrease quantity for %1").arg(item.product.name));
+                    quantity->setAccessibleName(QStringLiteral("Edit quantity for %1").arg(item.product.name));
+                    more->setAccessibleName(QStringLiteral("Increase quantity for %1").arg(item.product.name));
+                    const qint64 step = item.product.unit == Unit::Count ? 1000 : 100;
+                    const QString stepText = quantityText(item.product, step);
+                    less->setToolTip(QStringLiteral("Subtract %1").arg(stepText));
+                    more->setToolTip(QStringLiteral("Add %1").arg(stepText));
+                    quantityLayout->addWidget(less);
+                    quantityLayout->addWidget(quantity, 1);
+                    quantityLayout->addWidget(more);
+                    table->setCellWidget(row, 2, quantityControls);
+
+                    const auto updateQuantityButtons = [less, quantity, more, step](const OrderItem& line) {
+                        quantity->setText(quantityText(line.product, line.quantityMilli));
+                        less->setEnabled(line.quantityMilli > step);
+                        more->setEnabled(line.quantityMilli <= std::numeric_limits<qint64>::max() - step);
+                        };
+                    updateQuantityButtons(item);
+                    const auto setQuantity = [&, row, updateQuantityButtons](qint64 amount) {
+                        const auto& line = order.items().at(row);
+                        QString error;
+                        if (!order.setQuantity(line.product.id, amount, &error)) {
+                            QMessageBox::warning(&dialog, QStringLiteral("Edit Quantity"), error);
+                            return;
+                        }
+                        updateQuantityButtons(order.items().at(row));
+                        refreshTotals();
+                        };
+                    QObject::connect(less, &QPushButton::clicked, &dialog, [&, row, step, setQuantity] {
+                        setQuantity(order.items().at(row).quantityMilli - step);
+                        });
+                    QObject::connect(more, &QPushButton::clicked, &dialog, [&, row, step, setQuantity] {
+                        setQuantity(order.items().at(row).quantityMilli + step);
+                        });
+                    QObject::connect(quantity, &QPushButton::clicked, &dialog, [&, row, setQuantity] {
+                        const auto& line = order.items().at(row);
+                        const qint64 amount = requestQuantity(&dialog, line.product, line.quantityMilli);
+                        if (amount > 0) {
+                            setQuantity(amount);
+                        }
+                        });
+
+                    auto* description = new QPushButton(QStringLiteral("Description"), table);
+                    description->setProperty("role", "row");
+                    description->setAutoDefault(false);
+                    table->setCellWidget(row, 4, description);
+                    QObject::connect(description, &QPushButton::clicked, &dialog, [&, product = item.product] {
+                        showProduct(&dialog, product, dataDir);
+                        });
+
+                    auto* remove = new QPushButton(QStringLiteral("Remove"), table);
+                    remove->setProperty("role", "remove");
+                    remove->setAutoDefault(false);
+                    table->setCellWidget(row, 5, remove);
+                    QObject::connect(remove, &QPushButton::clicked, &dialog, [&, id = item.product.id] {
+                        order.remove(id);
+                        refresh();
+                        });
                 }
-                if (table->rowCount() > 0) {
-                    table->selectRow(0);
-                }
+                cartHeading->setText(QStringLiteral("Cart (%1)").arg(table->rowCount()));
+                refreshTotals();
                 generate->setEnabled(startOrderButton->isEnabled() && !order.items().isEmpty());
                 hold->setEnabled(!order.items().isEmpty());
-                updateButtons();
                 };
-            const auto selectedItem = [&]() -> const OrderItem* {
-                const int row = table->currentRow();
-                return row >= 0 && row < order.items().size() ? &order.items()[row] : nullptr;
-                };
-            QObject::connect(table, &QTableWidget::currentCellChanged, &dialog,
-                [&](int, int, int, int) { updateButtons(); });
-            QObject::connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            const auto addProduct = [&](QWidget* promptParent, const QString& barcode, bool manual) {
+            QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
+            const auto addProduct = [&](QWidget* promptParent, const QString& digits) {
                 Product product;
-                if (!lookupProduct(promptParent, dataDir, product, manual, barcode)) {
+                if (!lookupProduct(promptParent, dataDir, product, digits)) {
                     return false;
                 }
                 const qint64 quantity = product.unit == Unit::Count
@@ -446,15 +667,24 @@ namespace shop {
                 }
                 refresh();
                 return true;
-            };
+                };
             QObject::connect(scan, &QPushButton::clicked, &dialog, [&] {
-                scanOrderBarcodes(&dialog, [&](QWidget* scanner, const QString& barcode) {
-                    return addProduct(scanner, barcode, false);
+                scanOrderBarcodes(&dialog, [&](QWidget* scanner, const QString& digits) {
+                    return addProduct(scanner, digits);
+                    });
+                barcode->setFocus();
                 });
-            });
-            QObject::connect(enter, &QPushButton::clicked, &dialog, [&] {
-                addProduct(&dialog, {}, true);
-            });
+            QObject::connect(barcode, &QLineEdit::textChanged, &dialog, [&] {
+                enter->setEnabled(barcode->hasAcceptableInput());
+                });
+            const auto addManualBarcode = [&] {
+                if (barcode->hasAcceptableInput() && addProduct(&dialog, barcode->text())) {
+                    barcode->clear();
+                }
+                barcode->setFocus();
+                };
+            QObject::connect(enter, &QPushButton::clicked, &dialog, addManualBarcode);
+            QObject::connect(barcode, &QLineEdit::returnPressed, &dialog, addManualBarcode);
             QObject::connect(hold, &QPushButton::clicked, &dialog, [&] {
                 QString error;
                 if (!holdOrder(heldOrderPath(dataDir), order, error)) {
@@ -462,35 +692,6 @@ namespace shop {
                     return;
                 }
                 dialog.accept();
-                });
-            QObject::connect(description, &QPushButton::clicked, &dialog, [&] {
-                if (const auto* item = selectedItem()) {
-                    showProduct(&dialog, item->product, dataDir);
-                }
-                });
-            QObject::connect(edit, &QPushButton::clicked, &dialog, [&] {
-                const auto* selected = selectedItem();
-                if (!selected) {
-                    return;
-                }
-                const OrderItem item = *selected;
-                const qint64 quantity = requestQuantity(&dialog, item.product, item.quantityMilli);
-                if (quantity == 0) {
-                    return;
-                }
-                QString error;
-                if (!order.setQuantity(item.product.id, quantity, &error)) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Edit Quantity"), error);
-                    return;
-                }
-                refresh();
-                });
-            QObject::connect(remove, &QPushButton::clicked, &dialog, [&] {
-                if (const auto* item = selectedItem()) {
-                    const QString productId = item->product.id;
-                    order.remove(productId);
-                    refresh();
-                }
                 });
             QObject::connect(generate, &QPushButton::clicked, &dialog, [&] {
                 Bill bill;
@@ -522,6 +723,7 @@ namespace shop {
                 });
 
             refresh();
+            barcode->setFocus();
             dialog.exec();
         }
 
@@ -531,134 +733,128 @@ namespace shop {
         : QMainWindow(parent)
     {
         setWindowTitle(QStringLiteral("Super Duper Ultra Mega Store"));
-        resize(850, 520);
+        resize(1000, 375);
 
         auto* content = new QWidget(this);
+        content->setObjectName(QStringLiteral("posHome"));
         setCentralWidget(content);
         auto* layout = new QVBoxLayout(content);
-        layout->setContentsMargins(24, 24, 24, 24);
+        layout->setContentsMargins(26, 24, 26, 24);
         layout->setSpacing(16);
-        content->setObjectName(QStringLiteral("posHome"));
-        content->setStyleSheet(QStringLiteral(R"(
-            QWidget#posHome { background: #121316; color: #eeeff2; }
-            QWidget#posHome QFrame#barcodePanel {
-                background: #1a1c20; border: 1px solid #303238; border-radius: 12px;
-            }
-            QWidget#posHome QLabel { color: #bfc3cb; }
-            QWidget#posHome QLabel#posTitle { font-size: 28px; font-weight: 700; color: #f5f5f7; }
-            QWidget#posHome QLabel#toolsTitle { font-size: 17px; font-weight: 600; color: #eeeff2; }
-            QWidget#posHome QLabel#barcodePreview {
-                background: #f4f4f6; color: #494d57; border-radius: 8px;
-            }
-            QWidget#posHome QLineEdit {
-                background: #121316; color: #eeeff2; border: 1px solid #42454e;
-                border-radius: 6px; padding: 7px 9px;
-            }
-            QWidget#posHome QPushButton {
-                background: transparent; color: #d9dbe2; border: 1px solid transparent;
-                border-radius: 6px; padding: 6px 9px; min-height: 21px; font-weight: 500;
-            }
-            QWidget#posHome QPushButton:hover { background: #2b2e36; }
-            QWidget#posHome QPushButton:pressed { background: #343842; }
-            QWidget#posHome QPushButton:focus, QWidget#posHome QLineEdit:focus {
-                border-color: #a8b1ff;
-            }
-            QWidget#posHome QPushButton#newOrder:enabled,
-            QWidget#posHome QPushButton#productLookup:enabled {
-                padding: 8px 20px; border-radius: 8px; font-weight: 600;
-            }
-            QWidget#posHome QPushButton#newOrder:enabled,
-            QWidget#posHome QPushButton#productLookup:enabled {
-                background: #1a1c20; border-color: #4a4d57; color: #eeeff2;
-            }
-            QWidget#posHome QPushButton#newOrder:hover:enabled,
-            QWidget#posHome QPushButton#productLookup:hover:enabled {
-                background: #2b2e36; border-color: #a8b1ff;
-            }
-            QWidget#posHome QPushButton#newOrder:pressed:enabled,
-            QWidget#posHome QPushButton#productLookup:pressed:enabled {
-                background: #343842; border-color: #a8b1ff;
-            }
-            QWidget#posHome QPushButton#newOrder:focus:enabled,
-            QWidget#posHome QPushButton#productLookup:focus:enabled {
-                border-color: #a8b1ff;
-            }
-            QWidget#posHome QPushButton:disabled { color: #777b86; background: transparent; }
-        )"));
 
-        auto* inputLabel = new QLabel(QStringLiteral("Six-digit number"), content);
-        auto* input = new QLineEdit(content);
-        inputLabel->setBuddy(input);
-        input->setFocus();
+        auto* header = new QHBoxLayout;
+        auto* title = new QLabel(QStringLiteral("Super Duper Ultra Mega Store"), content);
+        title->setObjectName(QStringLiteral("pageTitle"));
+        auto* role = new QLabel(QStringLiteral("Cashier"), content);
+        role->setProperty("muted", true);
+        header->addWidget(title, 1);
+        header->addWidget(role);
+        layout->addLayout(header);
 
-        auto* generateButton = new QPushButton(QStringLiteral("Generate"), content);
-        auto* saveButton = new QPushButton(QStringLiteral("Save PNG"), content);
-        auto* readButton = new QPushButton(QStringLiteral("Read PNG"), content);
-        auto* scanButton = new QPushButton(QStringLiteral("Scan Camera"), content);
-        auto* lookupButton = new QPushButton(QStringLiteral("Product Lookup"), content);
-        auto* orderButton = new QPushButton(QStringLiteral("New Order"), content);
-        auto* managerButton = new QPushButton(QStringLiteral("Manager"), content);
-        auto* resumeButton = new QPushButton(QStringLiteral("Resume Held Order"), content);
+        auto* workArea = new QHBoxLayout;
+        workArea->setSpacing(14);
+        auto* cashier = new QGridLayout;
+        cashier->setSpacing(10);
+        const auto action = [content, cashier](const QString& label, int row, int column) {
+            auto* button = new QPushButton(label, content);
+            button->setProperty("role", "tile");
+            button->setMinimumHeight(72);
+            button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+            cashier->addWidget(button, row, column);
+            return button;
+            };
+        auto* orderButton = action(QStringLiteral("New Order"), 0, 0);
         orderButton->setObjectName(QStringLiteral("newOrder"));
+        auto* resumeButton = action(QStringLiteral("Resume Held Order"), 0, 1);
+        auto* findOrder = action(QStringLiteral("Find Order"), 1, 0);
+        findOrder->setEnabled(false);
+        findOrder->setToolTip(QStringLiteral("Order history is not available yet."));
+        auto* lookupButton = action(QStringLiteral("Product Lookup"), 1, 1);
         lookupButton->setObjectName(QStringLiteral("productLookup"));
-        orderButton->setMinimumHeight(46);
-        lookupButton->setMinimumHeight(46);
-        for (auto* button : { orderButton, lookupButton, generateButton, saveButton, readButton, scanButton }) {
-            button->setCursor(Qt::PointingHandCursor);
-        }
+        cashier->setColumnStretch(0, 1);
+        cashier->setColumnStretch(1, 1);
+        workArea->addLayout(cashier, 3);
+
+        auto* managerPanel = new QFrame(content);
+        managerPanel->setProperty("panel", true);
+        auto* managerLayout = new QVBoxLayout(managerPanel);
+        managerLayout->setContentsMargins(16, 14, 16, 14);
+        auto* managerTitle = new QLabel(QStringLiteral("Manager Access"), managerPanel);
+        managerTitle->setProperty("heading", true);
+        auto* managerDetails = new QLabel(QStringLiteral("PIN required"), managerPanel);
+        managerDetails->setProperty("muted", true);
+        auto* managerButton = new QPushButton(QStringLiteral("Open Manager Panel"), managerPanel);
+        managerLayout->addWidget(managerTitle);
+        managerLayout->addWidget(managerDetails);
+        managerLayout->addStretch();
+        managerLayout->addWidget(managerButton);
+        workArea->addWidget(managerPanel, 1);
+        layout->addLayout(workArea);
+
+        auto* utilityPanel = new QFrame(content);
+        utilityPanel->setProperty("panel", true);
+        auto* utilityLayout = new QVBoxLayout(utilityPanel);
+        utilityLayout->setContentsMargins(15, 12, 15, 12);
+        auto* utilityHeader = new QHBoxLayout;
+        auto* toolsTitle = new QLabel(QStringLiteral("Barcode Tools"), utilityPanel);
+        toolsTitle->setProperty("heading", true);
+        auto* toolsToggle = new QPushButton(QStringLiteral("Show Tools"), utilityPanel);
+        toolsToggle->setCheckable(true);
+        utilityHeader->addWidget(toolsTitle, 1);
+        utilityHeader->addWidget(toolsToggle);
+        utilityLayout->addLayout(utilityHeader);
+        layout->addWidget(utilityPanel);
+
+        auto* tools = new QWidget(utilityPanel);
+        auto* toolsRow = new QHBoxLayout(tools);
+        toolsRow->setContentsMargins(0, 6, 0, 0);
+        toolsRow->setSpacing(16);
+        auto* fields = new QVBoxLayout;
+        auto* inputLabel = new QLabel(QStringLiteral("Six-digit number"), tools);
+        auto* input = new QLineEdit(tools);
+        inputLabel->setBuddy(input);
+        auto* generateButton = new QPushButton(QStringLiteral("Generate"), tools);
+        auto* saveButton = new QPushButton(QStringLiteral("Save PNG"), tools);
+        auto* readButton = new QPushButton(QStringLiteral("Read PNG"), tools);
+        auto* scanButton = new QPushButton(QStringLiteral("Scan Camera"), tools);
         saveButton->setEnabled(false);
-
-        auto* preview = new QLabel(QStringLiteral("Barcode preview"), content);
-        preview->setAlignment(Qt::AlignCenter);
-        preview->setObjectName(QStringLiteral("barcodePreview"));
-        preview->setMinimumSize(270, 160);
-
-        auto* decodedLabel = new QLabel(QStringLiteral("Decoded number"), content);
-        auto* decodedOutput = new QLineEdit(content);
+        auto* decodedLabel = new QLabel(QStringLiteral("Decoded number"), tools);
+        auto* decodedOutput = new QLineEdit(tools);
         decodedOutput->setReadOnly(true);
         decodedLabel->setBuddy(decodedOutput);
 
-        auto* title = new QLabel(QStringLiteral("Super Duper Ultra Mega Store"), content);
-        title->setObjectName(QStringLiteral("posTitle"));
-        layout->addWidget(title);
-        auto* posActions = new QHBoxLayout;
-        posActions->setSpacing(10);
-        posActions->addWidget(orderButton);
-        posActions->addWidget(lookupButton);
-        posActions->addWidget(resumeButton);
-        posActions->addStretch();
-        posActions->addWidget(managerButton);
-        layout->addLayout(posActions);
-
-        auto* panel = new QFrame(content);
-        panel->setObjectName(QStringLiteral("barcodePanel"));
-        auto* panelLayout = new QVBoxLayout(panel);
-        panelLayout->setContentsMargins(18, 16, 18, 18);
-        auto* toolsTitle = new QLabel(QStringLiteral("Barcode Tools"), panel);
-        toolsTitle->setObjectName(QStringLiteral("toolsTitle"));
-        panelLayout->addWidget(toolsTitle);
-
-        auto* toolsRow = new QHBoxLayout;
-        toolsRow->setSpacing(18);
-        auto* fields = new QVBoxLayout;
         fields->addWidget(inputLabel);
         fields->addWidget(input);
         auto* generateActions = new QHBoxLayout;
         generateActions->addWidget(generateButton);
         generateActions->addWidget(saveButton);
         fields->addLayout(generateActions);
-        fields->addSpacing(10);
         auto* readActions = new QHBoxLayout;
         readActions->addWidget(readButton);
         readActions->addWidget(scanButton);
         fields->addLayout(readActions);
         fields->addWidget(decodedLabel);
         fields->addWidget(decodedOutput);
-        fields->addStretch();
+
+        auto* preview = new QLabel(QStringLiteral("Barcode preview"), tools);
+        preview->setAlignment(Qt::AlignCenter);
+        preview->setObjectName(QStringLiteral("barcodePreview"));
+        preview->setMinimumSize(270, 156);
         toolsRow->addLayout(fields, 1);
         toolsRow->addWidget(preview, 2);
-        panelLayout->addLayout(toolsRow, 1);
-        layout->addWidget(panel, 1);
+        utilityLayout->addWidget(tools);
+        tools->hide();
+        layout->addStretch();
+        content->setFocusPolicy(Qt::ClickFocus);
+        content->setFocus();
+        connect(toolsToggle, &QPushButton::toggled, this, [tools, toolsToggle, input](bool expanded) {
+            tools->setVisible(expanded);
+            toolsToggle->setText(expanded ? QStringLiteral("Hide Tools") : QStringLiteral("Show Tools"));
+            if (expanded) {
+                input->setFocus();
+            }
+            });
+        connect(input, &QLineEdit::returnPressed, generateButton, &QPushButton::click);
 
         const auto showBarcode = [this, preview, saveButton](const QImage& image) {
             previewImage_ = image;
@@ -753,7 +949,7 @@ namespace shop {
             if (!dataDir.isEmpty()) {
                 openManagerWindow(this, dataDir);
             }
-        });
+            });
         connect(lookupButton, &QPushButton::clicked, this, [this, dataDirectory] {
             const QString dataDir = dataDirectory();
             Product product;

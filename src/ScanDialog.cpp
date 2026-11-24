@@ -5,11 +5,14 @@
 #include "ImageProcessor.h"
 
 #include <QDialog>
-#include <QDialogButtonBox>
+#include <QFrame>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPalette>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPushButton>
 #include <QScopedValueRollback>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -47,9 +50,13 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        painter.fillRect(rect(), QColor("#111318"));
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath viewport;
+        viewport.addRoundedRect(QRectF(rect()), 10, 10);
+        painter.setClipPath(viewport);
+        painter.fillRect(rect(), palette().color(QPalette::Window).darker(130));
         if (frame_.isNull()) {
-            painter.setPen(Qt::white);
+            painter.setPen(palette().color(QPalette::WindowText));
             painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("Starting camera..."));
             return;
         }
@@ -61,8 +68,13 @@ protected:
         shade.addRect(QRectF(imageRect()));
         shade.addRect(QRectF(guide));
         painter.fillPath(shade, QColor(0, 0, 0, 145));
-        painter.setPen(QPen(accepted_ ? QColor("#65e4ac") : Qt::white, 2));
-        painter.drawRect(QRectF(guide).adjusted(1, 1, -1, -1));
+        const QColor accent = accepted_ ? QColor("#8fe0a1") : palette().color(QPalette::Accent);
+        painter.setPen(QPen(accent, 2));
+        painter.drawRoundedRect(QRectF(guide).adjusted(1, 1, -1, -1), 6, 6);
+        QColor centerLine = accent;
+        centerLine.setAlpha(130);
+        painter.setPen(QPen(centerLine, 1, Qt::DashLine));
+        painter.drawLine(guide.left() + 9, guide.center().y(), guide.right() - 9, guide.center().y());
     }
 
 private:
@@ -100,20 +112,42 @@ QString decodeFrame(const QImage& frame, const QRect& region)
 QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QString&)>& addBarcode)
 {
     QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Scan Barcode"));
-    dialog.resize(660, 440);
+    const QString title = addBarcode ? QStringLiteral("Scan Product") : QStringLiteral("Scan Barcode");
+    dialog.setWindowTitle(title);
+    dialog.setObjectName(QStringLiteral("scannerDialog"));
+    dialog.resize(710, 485);
     auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(20, 18, 20, 18);
+    layout->setSpacing(12);
+    auto* heading = new QLabel(title, &dialog);
+    heading->setObjectName(QStringLiteral("scanTitle"));
     auto* instruction = new QLabel(
-        QStringLiteral("Fit the entire barcode, including both white margins, inside the box."),
+        QStringLiteral("Fit the full barcode and its white margins inside the frame."),
         &dialog);
+    instruction->setObjectName(QStringLiteral("scanHint"));
     instruction->setWordWrap(true);
     auto* preview = new ScanPreview(&dialog);
-    auto* status = new QLabel(QStringLiteral("Ready to scan"), &dialog);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* footer = new QFrame(&dialog);
+    footer->setObjectName(QStringLiteral("scanFooter"));
+    auto* footerLayout = new QHBoxLayout(footer);
+    footerLayout->setContentsMargins(12, 8, 12, 8);
+    auto* feedback = new QVBoxLayout;
+    feedback->setSpacing(3);
+    auto* status = new QLabel(QStringLiteral("Ready to scan"), footer);
+    status->setObjectName(QStringLiteral("scanResult"));
+    auto* statusDetail = new QLabel(footer);
+    statusDetail->setObjectName(QStringLiteral("scanHint"));
+    statusDetail->setMinimumHeight(statusDetail->fontMetrics().height());
+    feedback->addWidget(status);
+    feedback->addWidget(statusDetail);
+    auto* close = new QPushButton(QStringLiteral("Close"), footer);
+    close->setObjectName(QStringLiteral("closeScanner"));
+    footerLayout->addLayout(feedback, 1);
+    footerLayout->addWidget(close);
+    layout->addWidget(heading);
     layout->addWidget(instruction);
     layout->addWidget(preview, 1);
-    layout->addWidget(status);
-    layout->addWidget(buttons);
+    layout->addWidget(footer);
 
     QVideoSink sink;
     CameraCapture camera;
@@ -126,7 +160,7 @@ QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QSt
     bool processing = false;
     bool running = true;
 
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
     QObject::connect(&dialog, &QDialog::finished, &camera, [&](int) { running = false; });
     QObject::connect(&flash, &QTimer::timeout, &dialog, [preview] {
         preview->setAccepted(false);
@@ -150,7 +184,6 @@ QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QSt
         if (barcode.isEmpty()) {
             if (!lastSeen.isEmpty() && ++clearFrames >= 3) {
                 lastSeen.clear();
-                status->setText(QStringLiteral("Ready to scan"));
             }
             return;
         }
@@ -166,13 +199,14 @@ QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QSt
         }
 
         QScopedValueRollback<bool> guard(processing, true);
-        if (addBarcode(&dialog, barcode)) {
+        const bool added = addBarcode(&dialog, barcode);
+        if (added) {
             preview->setAccepted(true);
             flash.start(330);
-            status->setText(QStringLiteral("Added barcode %1").arg(barcode));
-        } else {
-            status->setText(QStringLiteral("Barcode %1 was not added").arg(barcode));
         }
+        status->setText(QStringLiteral("Last scan  %1").arg(barcode));
+        statusDetail->setText(added ? QStringLiteral("Product added to order")
+                                   : QStringLiteral("Product was not added"));
     });
     QTimer::singleShot(0, &dialog, [&] {
         if (running) {
