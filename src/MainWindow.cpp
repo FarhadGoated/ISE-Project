@@ -5,11 +5,12 @@
 #include "BarcodeReader.h"
 #include "BarcodeTypes.h"
 #include "BillCalculator.h"
-#include "CameraCapture.h"
 #include "CheckoutStorage.h"
 #include "ImageProcessor.h"
 #include "InputValidator.h"
 #include "ProductCatalog.h"
+#include "ScanDialog.h"
+#include "ManagerWindow.h"
 
 #include <QComboBox>
 #include <QCoreApplication>
@@ -33,14 +34,11 @@
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
-#include <QRect>
 #include <QSaveFile>
 #include <QString>
 #include <QStringList>
 #include <QTableWidget>
-#include <QTimer>
 #include <QVBoxLayout>
-#include <QVideoWidget>
 #include <QWidget>
 
 #include <cmath>
@@ -49,83 +47,6 @@
 namespace shop {
 
     namespace {
-
-        QString scanBarcode(QWidget* parent)
-        {
-            QDialog dialog(parent);
-            dialog.setWindowTitle(QStringLiteral("Scan barcode"));
-
-            auto* layout = new QVBoxLayout(&dialog);
-            auto* instructions = new QLabel(
-                QStringLiteral("Center the barcode horizontally with both white margins visible."),
-                &dialog);
-            instructions->setWordWrap(true);
-
-            auto* preview = new QVideoWidget(&dialog);
-            preview->setMinimumSize(480, 270);
-
-            auto* cancelButton = new QPushButton(QStringLiteral("Cancel"), &dialog);
-            layout->addWidget(instructions);
-            layout->addWidget(preview, 1);
-            layout->addWidget(cancelButton);
-
-            QString decoded;
-            QString cameraError;
-            bool scanning = true;
-            CameraCapture capture;
-
-            QObject::connect(cancelButton, &QPushButton::clicked,
-                &dialog, &QDialog::reject);
-
-            QObject::connect(&dialog, &QDialog::finished, &capture, [&](int) {
-                scanning = false;
-                });
-
-            QObject::connect(&capture, &CameraCapture::cameraError, &dialog,
-                [&](const QString& message) {
-                    if (!scanning) {
-                        return;
-                    }
-
-                    cameraError = message;
-                    dialog.reject();
-                });
-
-            QObject::connect(&capture, &CameraCapture::frameReady, &dialog,
-                [&](const QImage& frame) {
-                    if (!scanning || frame.isNull()) {
-                        return;
-                    }
-
-                    const int insetX = frame.width() / 20;
-                    const int insetY = frame.height() / 4;
-                    const QRect scanArea = frame.rect().adjusted(
-                        insetX, insetY, -insetX, -insetY);
-
-                    for (const auto& runs : ImageProcessor::extractCameraRuns(frame, scanArea)) {
-                        if (BarcodeReader::decodeCode39Digits(runs, decoded)) {
-                            dialog.accept();
-                            return;
-                        }
-                    }
-                });
-
-            QTimer::singleShot(0, &dialog, [&] {
-                if (scanning) {
-                    capture.start(preview);
-                }
-                });
-
-            const int result = dialog.exec();
-            scanning = false;
-            capture.stop();
-
-            if (!cameraError.isEmpty()) {
-                QMessageBox::warning(parent, QStringLiteral("Camera"), cameraError);
-            }
-
-            return result == QDialog::Accepted ? decoded : QString{};
-        }
 
         QString findDataDirectory()
         {
@@ -202,7 +123,7 @@ namespace shop {
         }
 
         bool lookupProduct(QWidget* parent, const QString& dataDir, Product& product,
-            bool manual = false)
+            bool manual = false, QString barcode = {})
         {
             ProductCatalog catalog;
             QString error;
@@ -213,7 +134,6 @@ namespace shop {
                 return false;
             }
 
-            QString barcode;
             if (manual) {
                 bool accepted = false;
                 barcode = QInputDialog::getText(parent, QStringLiteral("Enter Barcode"),
@@ -226,8 +146,8 @@ namespace shop {
                     return false;
                 }
             }
-            else {
-                barcode = scanBarcode(parent);
+            else if (barcode.isEmpty()) {
+                barcode = scanProductBarcode(parent);
                 if (barcode.isEmpty()) {
                     return false;
                 }
@@ -508,25 +428,33 @@ namespace shop {
             QObject::connect(table, &QTableWidget::currentCellChanged, &dialog,
                 [&](int, int, int, int) { updateButtons(); });
             QObject::connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            const auto addProduct = [&](bool manual) {
+            const auto addProduct = [&](QWidget* promptParent, const QString& barcode, bool manual) {
                 Product product;
-                if (!lookupProduct(&dialog, dataDir, product, manual)) {
-                    return;
+                if (!lookupProduct(promptParent, dataDir, product, manual, barcode)) {
+                    return false;
                 }
-                const qint64 quantity = requestQuantity(&dialog, product, 1000);
+                const qint64 quantity = product.unit == Unit::Count
+                    ? 1000 : requestQuantity(promptParent, product, 1000);
                 if (quantity == 0) {
-                    return;
+                    return false;
                 }
 
                 QString error;
                 if (!order.add(product, quantity, &error)) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Add Product"), error);
-                    return;
+                    QMessageBox::warning(promptParent, QStringLiteral("Add Product"), error);
+                    return false;
                 }
                 refresh();
-                };
-            QObject::connect(scan, &QPushButton::clicked, &dialog, [&] { addProduct(false); });
-            QObject::connect(enter, &QPushButton::clicked, &dialog, [&] { addProduct(true); });
+                return true;
+            };
+            QObject::connect(scan, &QPushButton::clicked, &dialog, [&] {
+                scanOrderBarcodes(&dialog, [&](QWidget* scanner, const QString& barcode) {
+                    return addProduct(scanner, barcode, false);
+                });
+            });
+            QObject::connect(enter, &QPushButton::clicked, &dialog, [&] {
+                addProduct(&dialog, {}, true);
+            });
             QObject::connect(hold, &QPushButton::clicked, &dialog, [&] {
                 QString error;
                 if (!holdOrder(heldOrderPath(dataDir), order, error)) {
@@ -669,6 +597,7 @@ namespace shop {
         auto* scanButton = new QPushButton(QStringLiteral("Scan Camera"), content);
         auto* lookupButton = new QPushButton(QStringLiteral("Product Lookup"), content);
         auto* orderButton = new QPushButton(QStringLiteral("New Order"), content);
+        auto* managerButton = new QPushButton(QStringLiteral("Manager"), content);
         auto* resumeButton = new QPushButton(QStringLiteral("Resume Held Order"), content);
         orderButton->setObjectName(QStringLiteral("newOrder"));
         lookupButton->setObjectName(QStringLiteral("productLookup"));
@@ -698,6 +627,7 @@ namespace shop {
         posActions->addWidget(lookupButton);
         posActions->addWidget(resumeButton);
         posActions->addStretch();
+        posActions->addWidget(managerButton);
         layout->addLayout(posActions);
 
         auto* panel = new QFrame(content);
@@ -818,6 +748,12 @@ namespace shop {
             }
             return dataDir;
             };
+        connect(managerButton, &QPushButton::clicked, this, [this, dataDirectory] {
+            const QString dataDir = dataDirectory();
+            if (!dataDir.isEmpty()) {
+                openManagerWindow(this, dataDir);
+            }
+        });
         connect(lookupButton, &QPushButton::clicked, this, [this, dataDirectory] {
             const QString dataDir = dataDirectory();
             Product product;
@@ -849,7 +785,7 @@ namespace shop {
             recordOrder(this, dataDir, orderButton, true);
             });
         connect(scanButton, &QPushButton::clicked, this, [this, decodedOutput] {
-            const QString digits = scanBarcode(this);
+            const QString digits = scanProductBarcode(this);
             if (!digits.isEmpty()) {
                 decodedOutput->setText(digits);
             }

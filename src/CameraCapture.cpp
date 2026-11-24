@@ -24,20 +24,30 @@ CameraCapture::~CameraCapture()
 
 void CameraCapture::start(QVideoWidget* preview)
 {
+    if (!preview) {
+        stop();
+        emit cameraError(QStringLiteral("No camera preview is available."));
+        return;
+    }
+    start(*preview->videoSink());
+}
+
+void CameraCapture::start(QVideoSink& sink)
+{
     stop();
 
     const QCameraDevice device = QMediaDevices::defaultVideoInput();
-    if (!preview || device.isNull()) {
-        emit cameraError(QStringLiteral("No camera preview is available."));
+    if (device.isNull()) {
+        emit cameraError(QStringLiteral("No camera is available."));
         return;
     }
 
     camera_.setCameraDevice(device);
     session_.setCamera(&camera_);
-    session_.setVideoOutput(preview);
+    session_.setVideoSink(&sink);
 
     frameConnection_ = connect(
-        preview->videoSink(), &QVideoSink::videoFrameChanged, this,
+        &sink, &QVideoSink::videoFrameChanged, this,
         [this](const QVideoFrame& frame) {
             constexpr int scanIntervalMs = 150;
 
@@ -66,7 +76,7 @@ void CameraCapture::stop()
     disconnect(frameConnection_);
     frameConnection_ = {};
     camera_.stop();
-    session_.setVideoOutput(nullptr);
+    session_.setVideoSink(nullptr);
     session_.setCamera(nullptr);
     frameTimer_.invalidate();
 }

@@ -9,6 +9,7 @@
 #include <QString>
 
 class QVideoWidget;
+class QVideoSink;
 
 namespace shop {
 
@@ -20,6 +21,7 @@ public:
     ~CameraCapture() override;
 
     void start(QVideoWidget* preview);
+    void start(QVideoSink& sink);
     void stop();
 
 signals:
