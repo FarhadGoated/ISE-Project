@@ -56,7 +56,7 @@ namespace shop {
             return AddOutcome::Added;
         }
 
-    }  // namespace
+    }
 
     Order::Order(AvailabilityFn availability)
         : availability_(std::move(availability)) {
@@ -263,4 +263,4 @@ namespace shop {
     const QDateTime& Order::holdExpiry() const { return holdExpiry_; }
     const QDateTime& Order::paidAt() const { return paidAt_; }
 
-}  // namespace shop
+}

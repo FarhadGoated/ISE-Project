@@ -1,7 +1,10 @@
 #include "OrderDialog.h"
 
+#include "ProductCatalog.h"
+
 #include <QAbstractItemView>
 #include <QDateTime>
+#include <QDir>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -93,8 +96,12 @@ namespace shop {
     }
 
     qint64 OrderDialog::reservedFor(const Product& product) const {
+        const QDateTime now = QDateTime::currentDateTime();
         qint64 reserved = 0;
         for (const Order& held : held_) {
+            if (held.hasExpired(now)) {
+                continue;
+            }
             for (const OrderItem& item : held.items()) {
                 if (item.product.id == product.id) {
                     reserved += item.quantityMilli;
@@ -220,7 +227,7 @@ namespace shop {
             const double kg = QInputDialog::getDouble(
                 this, "Enter weight",
                 QString("Weight in kg for %1:").arg(product.name),
-                0.0, 0.0, 100000.0, 3, &ok);
+                0.001, 0.001, 100000.0, 3, &ok);
             if (!ok) {
                 return false;
             }
@@ -247,6 +254,12 @@ namespace shop {
         return true;
     }
 
+    void OrderDialog::resetCart() {
+        order_ = makeOrder();
+        customerEdit_->clear();
+        refreshCart();
+    }
+
     void OrderDialog::onAddClicked() {
         if (addBarcode(barcodeEdit_->text())) {
             barcodeEdit_->clear();
@@ -267,7 +280,7 @@ namespace shop {
         qint64 quantityMilli = 0;
         if (!parseQty(item->text(), isWeighted(product), quantityMilli)) {
             QMessageBox::warning(this, "Invalid quantity", "Please enter a valid number.");
-            refreshCart();
+            QTimer::singleShot(0, this, [this]() { refreshCart(); });
             return;
         }
 
@@ -282,7 +295,7 @@ namespace shop {
         if (outcome == AddOutcome::Rejected && !error.isEmpty()) {
             QMessageBox::warning(this, "Cannot change quantity", error);
         }
-        refreshCart();
+        QTimer::singleShot(0, this, [this]() { refreshCart(); });
     }
 
     void OrderDialog::onRemoveClicked() {

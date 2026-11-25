@@ -32,6 +32,7 @@ namespace shop {
 
     public slots:
         bool addBarcode(const QString& barcode);
+        void resetCart();
 
     signals:
         void checkoutRequested(const shop::Order& order, const QString& customer);
