@@ -2,6 +2,7 @@
 
 #include "ManagerAccess.h"
 #include "ProductCatalog.h"
+#include "SeasonsDialog.h"
 #include <QSizePolicy>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -247,8 +248,8 @@ namespace shop {
             QStringLiteral("Category management is pending."));
         addPendingPage(navigation, pages, QStringLiteral("Products"),
             QStringLiteral("Adding and editing products is pending."));
-        addPendingPage(navigation, pages, QStringLiteral("Seasonal Discounts"),
-            QStringLiteral("Seasonal discount management is pending."));
+        navigation->addItem(QStringLiteral("Seasonal Discounts"));
+        pages->addWidget(makeSeasonsPage(dataDir, pages));
         addPendingPage(navigation, pages, QStringLiteral("Reports"),
             QStringLiteral("Reports will appear here once order and bill records are connected."));
         addPendingPage(navigation, pages, QStringLiteral("Paid Order Approvals"),

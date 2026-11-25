@@ -6,6 +6,5 @@ class QWidget;
 
 namespace shop {
 
-bool editSeasons(QWidget* parent, const QString& dataDir);
-
+	QWidget* makeSeasonsPage(const QString& dataDir, QWidget* parent);
 } // namespace shop
