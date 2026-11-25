@@ -515,10 +515,9 @@ namespace shop {
             checkout->setContentsMargins(14, 12, 14, 12);
             auto* close = new QPushButton(QStringLiteral("Close"), checkoutPanel);
             auto* hold = new QPushButton(QStringLiteral("Hold Order"), checkoutPanel);
-            auto* draft = new QPushButton(QStringLiteral("Save draft"), checkoutPanel);
             auto* generate = new QPushButton(QStringLiteral("Generate Bill"), checkoutPanel);
             generate->setProperty("role", "primary");
-            for (auto* button : { close, draft, hold, generate }) button->setAutoDefault(false);
+            for (auto* button : { close, hold, generate }) button->setAutoDefault(false);
             auto* totals = new QGridLayout;
             totals->setHorizontalSpacing(16);
             auto* subtotal = new QLabel(checkoutPanel);
@@ -551,7 +550,6 @@ namespace shop {
             checkout->addWidget(payablePanel);
             checkout->addWidget(generate);
             checkout->addWidget(hold);
-            checkout->addWidget(draft);
             checkout->addStretch();
             checkout->addWidget(close);
             cartWorkspace->addWidget(checkoutPanel);
@@ -659,8 +657,6 @@ namespace shop {
                 cartHeading->setText(QStringLiteral("Cart (%1)").arg(table->rowCount()));
                 refreshTotals();
                 generate->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
-                draft->setVisible(!revision && prior.status != store::Status::OnHold);
-                draft->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
                 hold->setVisible(!revision);
                 hold->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
                 };
@@ -715,17 +711,15 @@ namespace shop {
                 };
             QObject::connect(enter, &QPushButton::clicked, &dialog, addManualBarcode);
             QObject::connect(barcode, &QLineEdit::returnPressed, &dialog, addManualBarcode);
-            const auto saveCart = [&](bool reserve) {
+            QObject::connect(hold, &QPushButton::clicked, &dialog, [&] {
                 QString error;
                 if (!CheckoutStorage::saveCart(dataDir, order, customer->text().trimmed(),
-                    contact->text().trimmed(), prior, reserve,
+                    contact->text().trimmed(), prior, true,
                     rates.specialBasisPoints, error)) {
-                    QMessageBox::warning(&dialog, reserve ? "Hold order" : "Save draft", error); return;
+                    QMessageBox::warning(&dialog, "Hold order", error); return;
                 }
                 dialog.accept();
-                };
-            QObject::connect(hold, &QPushButton::clicked, &dialog, [&] { saveCart(true); });
-            QObject::connect(draft, &QPushButton::clicked, &dialog, [&] { saveCart(false); });
+                });
             QObject::connect(special, &QPushButton::clicked, &dialog, [&] {
                 if (!authorizeManager(&dialog, "Approve special discount")) return;
                 bool ok = false;

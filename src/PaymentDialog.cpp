@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QFormLayout>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -86,17 +87,42 @@ namespace shop {
         public:
             PaymentDialog(QWidget* parent, qint64 payablePaisa, qint64 alreadyPaidPaisa)
                 : QDialog(parent), payablePaisa_(payablePaisa),
-                  creditPaisa_(qBound<qint64>(0, alreadyPaidPaisa, payablePaisa)),
-                  cashDue_(payablePaisa - creditPaisa_)
+                creditPaisa_(qBound<qint64>(0, alreadyPaidPaisa, payablePaisa)),
+                cashDue_(payablePaisa - creditPaisa_)
             {
                 setWindowTitle(QStringLiteral("Payment"));
+                resize(460, 330);
+                setMinimumWidth(420);
 
                 auto* layout = new QVBoxLayout(this);
-                form_ = new QFormLayout();
-                layout->addLayout(form_);
+                layout->setContentsMargins(20, 18, 20, 16);
+                layout->setSpacing(12);
+                auto* heading = new QLabel(QStringLiteral("Payment"), this);
+                heading->setObjectName(QStringLiteral("pageTitle"));
+                layout->addWidget(heading);
 
-                form_->addRow(QStringLiteral("Payable"),
-                    new QLabel(QStringLiteral("PKR ") + formatPkr(payablePaisa), this));
+                auto* totalPanel = new QFrame(this);
+                totalPanel->setObjectName(QStringLiteral("payablePanel"));
+                auto* totalLayout = new QVBoxLayout(totalPanel);
+                totalLayout->setContentsMargins(14, 10, 14, 12);
+                totalLayout->setSpacing(3);
+                auto* caption = new QLabel(alreadyPaidPaisa >= 0
+                    ? QStringLiteral("Revised bill total") : QStringLiteral("Amount due"), totalPanel);
+                caption->setProperty("muted", true);
+                auto* total = new QLabel(QStringLiteral("PKR ") + formatPkr(payablePaisa), totalPanel);
+                total->setObjectName(QStringLiteral("payableAmount"));
+                totalLayout->addWidget(caption);
+                totalLayout->addWidget(total);
+                layout->addWidget(totalPanel);
+
+                auto* details = new QFrame(this);
+                details->setProperty("panel", true);
+                form_ = new QFormLayout(details);
+                form_->setContentsMargins(14, 12, 14, 12);
+                form_->setVerticalSpacing(10);
+                form_->setHorizontalSpacing(12);
+                form_->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+                layout->addWidget(details);
 
                 if (alreadyPaidPaisa >= 0) {
                     const qint64 difference = payablePaisa - alreadyPaidPaisa;
@@ -115,9 +141,11 @@ namespace shop {
                 modeCombo_ = new QComboBox(this);
                 modeCombo_->addItems(QStringList{ QStringLiteral("Cash"), QStringLiteral("Card"),
                                                  QStringLiteral("Wallet") });
-                form_->addRow(QStringLiteral("Payment method"), modeCombo_);
+                modeCombo_->setMinimumHeight(34);
+                form_->addRow(QStringLiteral("&Payment method"), modeCombo_);
 
                 providerCombo_ = new QComboBox(this);
+                providerCombo_->setMinimumHeight(34);
                 form_->addRow(QStringLiteral("Provider"), providerCombo_);
 
                 otherEdit_ = new QLineEdit(this);
@@ -127,21 +155,38 @@ namespace shop {
                 receivedEdit_ = new QLineEdit(this);
                 receivedEdit_->setPlaceholderText(QStringLiteral("e.g. 500 or 500.50"));
                 form_->addRow(alreadyPaidPaisa >= 0 ? QStringLiteral("Additional cash tendered")
-                                                     : QStringLiteral("Amount received"), receivedEdit_);
+                    : QStringLiteral("Amount received"), receivedEdit_);
                 if (!cashDue_) receivedEdit_->setText(QStringLiteral("0.00"));
 
-                changeLabel_ = new QLabel(this);
-                form_->addRow(QStringLiteral("Balance to return"), changeLabel_);
+                changePanel_ = new QFrame(this);
+                changePanel_->setProperty("panel", true);
+                auto* changeRow = new QHBoxLayout(changePanel_);
+                changeRow->setContentsMargins(14, 8, 14, 8);
+                auto* changeCaption = new QLabel(QStringLiteral("Change to return"), changePanel_);
+                changeCaption->setProperty("muted", true);
+                changeLabel_ = new QLabel(changePanel_);
+                changeLabel_->setProperty("heading", true);
+                changeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                changeRow->addWidget(changeCaption, 1);
+                changeRow->addWidget(changeLabel_);
+                layout->addWidget(changePanel_);
 
                 messageLabel_ = new QLabel(this);
+                messageLabel_->setWordWrap(true);
+                messageLabel_->setStyleSheet(QStringLiteral("color: #f0aba0;"));
                 layout->addWidget(messageLabel_);
+                layout->addStretch();
 
                 auto* buttons = new QHBoxLayout();
                 auto* confirmButton = new QPushButton(QStringLiteral("Confirm payment"), this);
                 auto* cancelButton = new QPushButton(QStringLiteral("Cancel"), this);
                 buttons->addStretch(1);
-                buttons->addWidget(confirmButton);
+                confirmButton->setProperty("role", "primary");
+                confirmButton->setMinimumHeight(40);
+                confirmButton->setDefault(true);
+                cancelButton->setAutoDefault(false);
                 buttons->addWidget(cancelButton);
+                buttons->addWidget(confirmButton);
                 layout->addLayout(buttons);
 
                 connect(modeCombo_, &QComboBox::currentIndexChanged, this, [this](int) { refresh(); });
@@ -151,6 +196,7 @@ namespace shop {
                 connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
 
                 refresh();
+                if (cashDue_ > 0) receivedEdit_->setFocus();
             }
 
             const PaymentInput& result() const { return result_; }
@@ -175,6 +221,7 @@ namespace shop {
                 form_->setRowVisible(providerCombo_, needsProvider);
                 form_->setRowVisible(otherEdit_, other);
                 form_->setRowVisible(receivedEdit_, cash && cashDue_ > 0);
+                changePanel_->setVisible(cash);
 
                 if (cash) {
                     qint64 entered = 0;
@@ -182,7 +229,7 @@ namespace shop {
                         changeLabel_->setText(QStringLiteral("PKR ") + formatPkr(entered - cashDue_));
                     }
                     else {
-                        changeLabel_->setText(QStringLiteral("-"));
+                        changeLabel_->setText(QStringLiteral("\u2014"));
                     }
                 }
                 else {
@@ -244,6 +291,7 @@ namespace shop {
             QComboBox* providerCombo_ = nullptr;
             QLineEdit* otherEdit_ = nullptr;
             QLineEdit* receivedEdit_ = nullptr;
+            QFrame* changePanel_ = nullptr;
             QLabel* changeLabel_ = nullptr;
             QLabel* messageLabel_ = nullptr;
         };
