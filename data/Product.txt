@@ -1,2 +1,15 @@
-P001 123456 MILK "Whole Milk" count 200.00 10.00 5.00 5 barcodes/123456.png #
-P002 987654 RICE "White Rice" weight 300.00 20.00 10.00 5.000 barcodes/987654.png #
+P001 123456 MILK "Whole Milk" count 200.00 10.00 5.00 10 barcodes/123456.png 12 #
+P002 987654 RICE "White Rice" weight 300.00 20.00 10.00 5.000 barcodes/987654.png 98 #
+P003 120001 YOGURT "Plain Yogurt" count 180.00 9.00 0.00 40 barcodes/120001.png 12 #
+P004 120002 EGGS "Farm Eggs Dozen" count 380.00 0.00 10.00 30 barcodes/120002.png 12 #
+P005 200001 APPLE "Red Apples" weight 450.00 0.00 20.00 25.000 barcodes/200001.png 20 #
+P006 200002 MANGO "Sindhri Mangoes" weight 380.00 0.00 0.00 40.000 barcodes/200002.png 20 #
+P007 200003 BANANA "Bananas" weight 220.00 0.00 0.00 30.000 barcodes/200003.png 20 #
+P008 200004 ORANGE "Kinnow Oranges" weight 260.00 0.00 15.00 35.000 barcodes/200004.png 20 #
+P009 200005 GRAPES "Green Grapes" weight 600.00 0.00 30.00 12.500 barcodes/200005.png 20 #
+P010 200006 POMEGRN "Pomegranates" weight 520.00 0.00 0.00 18.000 barcodes/200006.png 20 #
+P011 300001 POTATO "Potatoes" weight 120.00 0.00 0.00 60.000 barcodes/300001.png 30 #
+P012 300002 ONION "Onions" weight 140.00 0.00 5.00 50.000 barcodes/300002.png 30 #
+P013 300003 TOMATO "Tomatoes" weight 160.00 0.00 0.00 28.000 barcodes/300003.png 30 #
+P014 980001 SUGAR "White Sugar" weight 170.00 8.00 0.00 45.000 barcodes/980001.png 98 #
+P015 980002 OIL "Cooking Oil 1L" count 650.00 35.00 25.00 20 barcodes/980002.png 98 #

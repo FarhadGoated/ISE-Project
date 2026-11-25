@@ -1,0 +1,4 @@
+12 "Dairy" DAIRY #
+20 "Fruits" FRUIT #
+30 "Vegetables" VEG #
+98 "Grocery" GROCERY #
