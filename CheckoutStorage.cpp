@@ -1,417 +1,1135 @@
-// CheckoutStorage.cpp
+// CheckoutStorage.cpp  --  Shahzeen | Storage and checkout integration
 #include "CheckoutStorage.h"
-#include "ProductCatalog.h"
-#include "Order.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QHash>
 #include <QRegularExpression>
-#include <QSaveFile>
-#include <QStringList>
-#include <QVector>
-#include <limits>
+#include <QSet>
+#include <QStringConverter>
+#include <QTextStream>
 
-namespace shop {
-namespace {
+namespace store {
 
-// ---- Provisional rules (confirm with the teacher) --------------------------
-const QStringList kPaymentModes = {
-    QStringLiteral("cash"), QStringLiteral("card"), QStringLiteral("online")};
-const QStringList kStatuses = {
-    QStringLiteral("in-progress"), QStringLiteral("paid")};
+// =====================================================================
+//  Locale independent formatting and parsing
+// =====================================================================
 
-constexpr qint64 kMaxOrderSeq = 999999;
-constexpr qint64 kMaxBillSeq  = 999999999;
-
-const char* const kOrderFile  = "Order.txt";
-const char* const kDetailFile = "OrderDetail.txt";
-const char* const kBillFile   = "Bill.txt";
-const char* const kProductFile = "Product.txt";
-
-// ---- Helpers ----------------------------------------------------------------
-bool fail(QString* error, const QString& msg) {
-    if (error) *error = msg;
-    return false;
-}
-
-// Integer paisa -> "565.00"
-QString formatMoney(qint64 paisa) {
+QString formatPkr(qint64 paisa)
+{
     const bool neg = paisa < 0;
-    const quint64 a = neg ? quint64(-(paisa + 1)) + 1u : quint64(paisa);
+    const qint64 a = neg ? -paisa : paisa;
     return QStringLiteral("%1%2.%3")
         .arg(neg ? QStringLiteral("-") : QString())
         .arg(a / 100)
         .arg(a % 100, 2, 10, QLatin1Char('0'));
 }
 
-// Integer thousandths -> "0.500"
-QString formatMilli3(qint64 milli) {
-    return QStringLiteral("%1.%2")
-        .arg(milli / 1000)
-        .arg(milli % 1000, 3, 10, QLatin1Char('0'));
-}
-
-// Count -> whole units ("2"), weight -> decimal kg ("0.500").
-// Share this formatter with Anaya so Product.txt stays consistent.
-QString formatQuantity(Unit unit, qint64 milli) {
-    return unit == Unit::Count ? QString::number(milli / 1000)
-                               : formatMilli3(milli);
-}
-
-// Quote text, escaping backslash and double quote.
-QString quoted(const QString& s) {
-    QString out;
-    out.reserve(s.size() + 2);
-    out += QLatin1Char('"');
-    for (const QChar c : s) {
-        if (c == QLatin1Char('"') || c == QLatin1Char('\\'))
-            out += QLatin1Char('\\');
-        out += c;
-    }
-    out += QLatin1Char('"');
-    return out;
-}
-
-bool isAllDigits(const QString& s) {
-    if (s.isEmpty()) return false;
-    for (const QChar c : s)
-        if (c < QLatin1Char('0') || c > QLatin1Char('9')) return false;
+bool parsePkr(const QString &text, qint64 *paisa)
+{
+    static const QRegularExpression re(QStringLiteral("^(-?)(\\d+)(?:\\.(\\d{1,2}))?$"));
+    const auto m = re.match(text);
+    if (!m.hasMatch())
+        return false;
+    QString frac = m.captured(3);
+    while (frac.size() < 2)
+        frac += QLatin1Char('0');
+    qint64 v = m.captured(2).toLongLong() * 100 + frac.toLongLong();
+    if (m.captured(1) == QLatin1String("-"))
+        v = -v;
+    *paisa = v;
     return true;
 }
 
-bool addOverflows(qint64 a, qint64 b) {
-    return (b > 0 && a > std::numeric_limits<qint64>::max() - b) ||
-           (b < 0 && a < std::numeric_limits<qint64>::min() - b);
+QString formatQty(qint64 milli, bool weighted)
+{
+    if (!weighted)
+        return QString::number(milli / 1000);
+    return QStringLiteral("%1.%2").arg(milli / 1000).arg(milli % 1000, 3, 10, QLatin1Char('0'));
 }
 
-// Read a whole file. A missing file is not an error (exists = false).
-bool readAll(const QString& path, QByteArray& bytes, bool& exists,
-             QString* error) {
-    bytes.clear();
-    exists = QFile::exists(path);
-    if (!exists) return true;
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return fail(error, QStringLiteral("%1: cannot read (%2)")
-                               .arg(QFileInfo(path).fileName(), f.errorString()));
-    bytes = f.readAll();
+bool parseQty(const QString &text, qint64 *milli, bool *weighted)
+{
+    static const QRegularExpression re(QStringLiteral("^(\\d+)(?:\\.(\\d{1,3}))?$"));
+    const auto m = re.match(text);
+    if (!m.hasMatch())
+        return false;
+    const bool w = m.captured(2).size() > 0;
+    QString frac = m.captured(2);
+    while (frac.size() < 3)
+        frac += QLatin1Char('0');
+    *milli = m.captured(1).toLongLong() * 1000 + frac.toLongLong();
+    *weighted = w;
     return true;
 }
 
-QStringList splitLines(const QByteArray& bytes) {
-    QStringList lines = QString::fromUtf8(bytes).split(QLatin1Char('\n'));
-    for (QString& l : lines)
-        if (l.endsWith(QLatin1Char('\r'))) l.chop(1);
-    return lines;
+QString formatDate(const QDate &d)
+{
+    if (!d.isValid())
+        return QString();
+    return QStringLiteral("%1-%2-%3")
+        .arg(d.year(), 4, 10, QLatin1Char('0'))
+        .arg(d.month(), 2, 10, QLatin1Char('0'))
+        .arg(d.day(), 2, 10, QLatin1Char('0'));
 }
 
-// Split a line on whitespace, keeping quoted tokens (with escapes) as raw text.
-bool tokenizeRaw(const QString& line, QStringList& tokens) {
-    tokens.clear();
+QString formatTime(const QTime &t)
+{
+    if (!t.isValid())
+        return QString();
+    return QStringLiteral("%1:%2:%3")
+        .arg(t.hour(), 2, 10, QLatin1Char('0'))
+        .arg(t.minute(), 2, 10, QLatin1Char('0'))
+        .arg(t.second(), 2, 10, QLatin1Char('0'));
+}
+
+QString formatStamp(const QDateTime &dt)
+{
+    if (!dt.isValid())
+        return QString();
+    return formatDate(dt.date()) + QLatin1Char(' ') + formatTime(dt.time());
+}
+
+QDateTime parseStamp(const QString &text)
+{
+    if (text.isEmpty())
+        return QDateTime();
+    return QDateTime::fromString(text, QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+}
+
+// =====================================================================
+//  Record tokenizer / writer (space separated, quoted text, \\ and \" escapes)
+// =====================================================================
+
+namespace {
+
+struct Tok { QString text; bool quoted; };
+
+bool tokenize(const QString &line, QList<Tok> *out, QString *err)
+{
     int i = 0;
     const int n = line.size();
     while (i < n) {
-        if (line[i].isSpace()) { ++i; continue; }
-        QString tok;
-        bool inQuote = false;
-        while (i < n && (inQuote || !line[i].isSpace())) {
-            const QChar c = line[i];
-            if (inQuote && c == QLatin1Char('\\') && i + 1 < n) {
-                tok += c; tok += line[i + 1]; i += 2; continue;
-            }
-            if (c == QLatin1Char('"')) inQuote = !inQuote;
-            tok += c;
+        const QChar c = line[i];
+        if (c.isSpace()) { ++i; continue; }
+        if (c == QLatin1Char('"')) {
             ++i;
+            QString s;
+            bool closed = false;
+            while (i < n) {
+                const QChar d = line[i];
+                if (d == QLatin1Char('\\') && i + 1 < n) { s += line[i + 1]; i += 2; continue; }
+                if (d == QLatin1Char('"')) { closed = true; ++i; break; }
+                s += d; ++i;
+            }
+            if (!closed) { *err = QStringLiteral("unterminated quoted text"); return false; }
+            out->append({s, true});
+        } else {
+            int j = i;
+            while (j < n && !line[j].isSpace()) ++j;
+            out->append({line.mid(i, j - i), false});
+            i = j;
         }
-        if (inQuote) return false;  // unterminated quote
-        tokens << tok;
     }
     return true;
 }
 
-// Largest existing sequence in a file whose first token is an ID of idLen
-// digits; the sequence is the first seqLen digits. Returns the next one.
-bool nextSequence(const QByteArray& bytes, const QString& fileName, int idLen,
-                  int seqLen, qint64 maxSeq, qint64& next, QString* error) {
-    qint64 maxFound = 0;
-    const QStringList lines = splitLines(bytes);
-    for (int i = 0; i < lines.size(); ++i) {
-        const QString t = lines[i].trimmed();
-        if (t.isEmpty()) continue;
-        const QString id = t.section(QRegularExpression(QStringLiteral("\\s")), 0, 0);
-        if (id.size() != idLen || !isAllDigits(id))
-            return fail(error, QStringLiteral("%1 line %2: invalid ID")
-                                   .arg(fileName).arg(i + 1));
-        maxFound = qMax(maxFound, id.left(seqLen).toLongLong());
+QString quote(const QString &s)
+{
+    bool need = s.isEmpty();
+    for (const QChar c : s)
+        if (c.isSpace() || c == QLatin1Char('"') || c == QLatin1Char('\\') || c == QLatin1Char('#'))
+            need = true;
+    if (!need)
+        return s;
+    QString r = QStringLiteral("\"");
+    for (const QChar c : s) {
+        if (c == QLatin1Char('"') || c == QLatin1Char('\\'))
+            r += QLatin1Char('\\');
+        r += c;
     }
-    if (maxFound >= maxSeq)
-        return fail(error, QStringLiteral("%1: ID range exhausted").arg(fileName));
-    next = maxFound + 1;
-    return true;
+    r += QLatin1Char('"');
+    return r;
 }
 
-bool validateBill(const Bill& bill, const CheckoutDetails& d,
-                  QString* error) {
-    if (bill.lines.isEmpty())
-        return fail(error, QStringLiteral("Bill has no lines"));
-    if (d.customerName.trimmed().isEmpty())
-        return fail(error, QStringLiteral("Customer name is required"));
-    if (!kPaymentModes.contains(d.paymentMode))
-        return fail(error, QStringLiteral("Unsupported payment mode: %1")
-                               .arg(d.paymentMode));
-    if (!kStatuses.contains(d.status))
-        return fail(error, QStringLiteral("Unsupported status: %1").arg(d.status));
-
-    Amounts sum;
-    for (const BillLine& l : bill.lines) {
-        const Product& p = l.item.product;
-        if (p.id.isEmpty() || !isAllDigits(p.barcode) || p.barcode.size() != 6 ||
-            p.acronym.isEmpty())
-            return fail(error, QStringLiteral("Bill line has an invalid product"));
-        if (l.item.quantityMilli <= 0)
-            return fail(error, QStringLiteral("Bill line %1 has invalid quantity")
-                                   .arg(p.id));
-        const Amounts& a = l.amounts;
-        if (a.subtotalPaisa < 0 || a.taxPaisa < 0 || a.discountPaisa < 0)
-            return fail(error, QStringLiteral("Bill line %1 has negative amounts")
-                                   .arg(p.id));
-        if (addOverflows(sum.subtotalPaisa, a.subtotalPaisa) ||
-            addOverflows(sum.taxPaisa, a.taxPaisa) ||
-            addOverflows(sum.discountPaisa, a.discountPaisa))
-            return fail(error, QStringLiteral("Bill amounts overflow"));
-        sum.subtotalPaisa += a.subtotalPaisa;
-        sum.taxPaisa += a.taxPaisa;
-        sum.discountPaisa += a.discountPaisa;
+class Row {
+public:
+    Row &text(const QString &s) { m_parts << quote(s); return *this; }
+    Row &raw(const QString &s) { m_parts << s; return *this; }
+    Row &money(qint64 p) { m_parts << formatPkr(p); return *this; }
+    QByteArray finish(bool hash) const
+    {
+        QString s = m_parts.join(QLatin1Char(' '));
+        if (hash)
+            s += QStringLiteral(" #");
+        s += QLatin1Char('\n');
+        return s.toUtf8();
     }
-    const Amounts& t = bill.totals;
-    if (sum.subtotalPaisa != t.subtotalPaisa || sum.taxPaisa != t.taxPaisa ||
-        sum.discountPaisa != t.discountPaisa)
-        return fail(error, QStringLiteral("Bill totals do not match its lines"));
-    if (addOverflows(t.subtotalPaisa, t.taxPaisa) ||
-        t.subtotalPaisa + t.taxPaisa - t.discountPaisa != t.payablePaisa ||
-        t.payablePaisa < 0)
-        return fail(error, QStringLiteral("Bill payable is inconsistent"));
-    if (d.status == QLatin1String("paid") && d.paymentPaisa != t.payablePaisa)
-        return fail(error, QStringLiteral("Payment amount must equal payable"));
-    return true;
-}
-
-struct PendingFile {
-    QString name;        // e.g. "Order.txt"
-    QString path;
-    QByteArray oldBytes;
-    bool existed = false;
-    QByteArray newBytes;
+private:
+    QStringList m_parts;
 };
 
-QByteArray appended(const QByteArray& old, const QString& rows) {
-    QByteArray out = old;
-    if (!out.isEmpty() && !out.endsWith('\n')) out += '\n';
-    out += rows.toUtf8();
-    return out;
-}
+// Reads a table. fn returns an empty string when the row is accepted, otherwise the reason.
+using RowFn = std::function<QString(const QStringList &)>;
 
-bool commitFile(const PendingFile& f, QString* error) {
-    QSaveFile sf(f.path);
-    if (!sf.open(QIODevice::WriteOnly))
-        return fail(error, QStringLiteral("%1: cannot open for writing (%2)")
-                               .arg(f.name, sf.errorString()));
-    if (sf.write(f.newBytes) != f.newBytes.size()) {
-        sf.cancelWriting();
-        return fail(error, QStringLiteral("%1: write failed (%2)")
-                               .arg(f.name, sf.errorString()));
+void readTable(const QString &path, const QString &name, int fields, bool hasHash,
+               QStringList *errors, const RowFn &fn)
+{
+    QFile f(path);
+    if (!f.exists())
+        return; // fresh start
+    if (!f.open(QIODevice::ReadOnly)) {
+        errors->append(QStringLiteral("%1: cannot open (%2)").arg(name, f.errorString()));
+        return;
     }
-    if (!sf.commit())
-        return fail(error, QStringLiteral("%1: commit failed (%2)")
-                               .arg(f.name, sf.errorString()));
-    return true;
-}
-
-bool restoreFile(const PendingFile& f) {
-    if (!f.existed) return !QFile::exists(f.path) || QFile::remove(f.path);
-    QSaveFile sf(f.path);
-    if (!sf.open(QIODevice::WriteOnly)) return false;
-    if (sf.write(f.oldBytes) != f.oldBytes.size()) {
-        sf.cancelWriting();
-        return false;
-    }
-    return sf.commit();
-}
-
-// Rewrite Product.txt, replacing only the stock field (index 8) of the
-// products in newStock. The other fields are kept exactly as read.
-bool rewriteProducts(const QByteArray& oldBytes,
-                     const QHash<QString, Product>& updated,
-                     QByteArray& out, QString* error) {
-    const QStringList lines = splitLines(oldBytes);
-    QStringList result;
-    QHash<QString, bool> seen;
-    for (int i = 0; i < lines.size(); ++i) {
-        const QString& line = lines[i];
-        if (line.trimmed().isEmpty()) {
-            // keep blank lines, but drop the artificial one after the last '\n'
-            if (i != lines.size() - 1) result << line;
+    QTextStream in(&f);
+    in.setEncoding(QStringConverter::Utf8);
+    int lineNo = 0;
+    while (!in.atEnd()) {
+        const QString line = in.readLine();
+        ++lineNo;
+        if (line.trimmed().isEmpty())
+            continue;
+        auto fail = [&](const QString &why) {
+            errors->append(QStringLiteral("%1 line %2: %3").arg(name).arg(lineNo).arg(why));
+        };
+        QList<Tok> toks;
+        QString err;
+        if (!tokenize(line, &toks, &err)) { fail(err); continue; }
+        if (hasHash) {
+            if (toks.isEmpty() || toks.last().quoted || toks.last().text != QLatin1String("#")) {
+                fail(QStringLiteral("record does not end with #"));
+                continue;
+            }
+            toks.removeLast();
+        }
+        if (toks.size() != fields) {
+            fail(QStringLiteral("expected %1 fields, found %2").arg(fields).arg(toks.size()));
             continue;
         }
-        QStringList tok;
-        if (!tokenizeRaw(line, tok) || tok.size() != 11 ||
-            tok.last() != QLatin1String("#"))
-            return fail(error, QStringLiteral("Product.txt line %1: malformed")
-                                   .arg(i + 1));
-        const auto it = updated.constFind(tok[0]);
-        if (it != updated.constEnd()) {
-            tok[8] = formatQuantity(it->unit, it->stockMilli);
-            seen[tok[0]] = true;
-        }
-        result << tok.join(QLatin1Char(' '));
+        QStringList vals;
+        for (const Tok &t : toks) vals << t.text;
+        const QString why = fn(vals);
+        if (!why.isEmpty())
+            fail(why);
     }
-    for (auto it = updated.constBegin(); it != updated.constEnd(); ++it)
-        if (!seen.contains(it.key()))
-            return fail(error, QStringLiteral("Product.txt: product %1 not found")
-                                   .arg(it.key()));
-    out = (result.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8();
+}
+
+QString checkBillId(const QString &id)
+{
+    static const QRegularExpression re(QStringLiteral("^\\d{9}$"));
+    return re.match(id).hasMatch() ? QString() : QStringLiteral("Bill ID '%1' is not nine digits").arg(id);
+}
+
+} // namespace
+
+// =====================================================================
+//  Construction and loading
+// =====================================================================
+
+namespace {
+const char *kFiles[] = {"Order.txt", "OrderDetail.txt", "Bill.txt", "BillDetail.txt",
+                        "Lifecycle.txt", "OrderSnapshot.txt", "BillMeta.txt"};
+}
+
+CheckoutStorage::CheckoutStorage(const QString &dataDir, IInventory *inventory)
+    : m_dir(dataDir), m_inv(inventory)
+{
+    QDir().mkpath(m_dir);
+}
+
+QString CheckoutStorage::path(const QString &name) const
+{
+    return QDir(m_dir).filePath(name);
+}
+
+bool CheckoutStorage::load()
+{
+    m_orders.clear();
+    m_bills.clear();
+    m_loadErrors.clear();
+    QStringList &errs = m_loadErrors;
+
+    // Orders
+    readTable(path("Order.txt"), "Order.txt", 9, true, &errs, [&](const QStringList &v) -> QString {
+        OrderRecord o;
+        o.orderId = v[0];
+        o.orderDate = QDate::fromString(v[1], QStringLiteral("yyyy-MM-dd"));
+        o.orderTime = QTime::fromString(v[2], QStringLiteral("HH:mm:ss"));
+        if (!o.orderDate.isValid() || !o.orderTime.isValid())
+            return QStringLiteral("bad order date or time");
+        o.customerName = v[3];
+        o.contact = v[4];
+        o.status = v[5];
+        if (!parsePkr(v[6], &o.paymentPaisa))
+            return QStringLiteral("bad payment amount '%1'").arg(v[6]);
+        o.paymentMode = v[7];
+        o.paymentMerchant = v[8];
+        if (m_orders.contains(o.orderId))
+            return QStringLiteral("duplicate Order ID %1").arg(o.orderId);
+        m_orders.insert(o.orderId, o);
+        return {};
+    });
+
+    readTable(path("OrderDetail.txt"), "OrderDetail.txt", 4, false, &errs, [&](const QStringList &v) -> QString {
+        auto it = m_orders.find(v[0]);
+        if (it == m_orders.end())
+            return QStringLiteral("unknown Order ID %1").arg(v[0]);
+        OrderLine l;
+        l.productId = v[1];
+        l.barcode = v[2];
+        if (!parseQty(v[3], &l.qtyMilli, &l.weighted))
+            return QStringLiteral("bad quantity '%1'").arg(v[3]);
+        it->lines.append(l);
+        return {};
+    });
+
+    readTable(path("OrderSnapshot.txt"), "OrderSnapshot.txt", 6, true, &errs, [&](const QStringList &v) -> QString {
+        auto it = m_orders.find(v[0]);
+        if (it == m_orders.end())
+            return QStringLiteral("unknown Order ID %1").arg(v[0]);
+        for (OrderLine &l : it->lines) {
+            if (l.productId == v[1]) {
+                l.acronym = v[2];
+                if (!parsePkr(v[3], &l.unitPricePaisa) || !parsePkr(v[4], &l.taxPerUnitPaisa)
+                    || !parsePkr(v[5], &l.discountPerUnitPaisa))
+                    return QStringLiteral("bad snapshot amount");
+                return {};
+            }
+        }
+        return QStringLiteral("snapshot for product %1 has no order line").arg(v[1]);
+    });
+
+    readTable(path("Lifecycle.txt"), "Lifecycle.txt", 4, true, &errs, [&](const QStringList &v) -> QString {
+        auto it = m_orders.find(v[0]);
+        if (it == m_orders.end())
+            return QStringLiteral("unknown Order ID %1").arg(v[0]);
+        it->holdExpiry = parseStamp(v[1]);
+        it->paidAt = parseStamp(v[2]);
+        if ((!v[1].isEmpty() && !it->holdExpiry.isValid()) || (!v[2].isEmpty() && !it->paidAt.isValid()))
+            return QStringLiteral("bad timestamp");
+        it->activeBillId = v[3];
+        return {};
+    });
+
+    // Bills
+    readTable(path("Bill.txt"), "Bill.txt", 14, true, &errs, [&](const QStringList &v) -> QString {
+        BillRecord b;
+        const QString idErr = checkBillId(v[0]);
+        if (!idErr.isEmpty())
+            return idErr;
+        b.billId = v[0];
+        b.customerName = v[1];
+        b.orderId = v[2];
+        if (!parsePkr(v[3], &b.totalBeforeTax) || !parsePkr(v[4], &b.totalTax)
+            || !parsePkr(v[5], &b.totalProductDiscount) || !parsePkr(v[6], &b.totalPayable)
+            || !parsePkr(v[7], &b.amountReceived) || !parsePkr(v[8], &b.balanceReturned)
+            || !parsePkr(v[10], &b.seasonalDiscount) || !parsePkr(v[11], &b.specialDiscount))
+            return QStringLiteral("bad money amount");
+        b.paymentStatus = v[9];
+        b.billDate = QDate::fromString(v[12], QStringLiteral("yyyy-MM-dd"));
+        b.billTime = QTime::fromString(v[13], QStringLiteral("HH:mm:ss"));
+        if (!b.billDate.isValid() || !b.billTime.isValid())
+            return QStringLiteral("bad bill date or time");
+        if (m_bills.contains(b.billId))
+            return QStringLiteral("duplicate Bill ID %1").arg(b.billId);
+        m_bills.insert(b.billId, b);
+        return {};
+    });
+
+    readTable(path("BillDetail.txt"), "BillDetail.txt", 5, true, &errs, [&](const QStringList &v) -> QString {
+        auto it = m_bills.find(v[0]);
+        if (it == m_bills.end())
+            return QStringLiteral("unknown Bill ID %1").arg(v[0]);
+        BillLine l;
+        l.acronym = v[1];
+        if (!parsePkr(v[2], &l.unitPricePaisa) || !parseQty(v[3], &l.qtyMilli, &l.weighted)
+            || !parsePkr(v[4], &l.productDiscountPaisa))
+            return QStringLiteral("bad bill line value");
+        it->lines.append(l);
+        return {};
+    });
+
+    readTable(path("BillMeta.txt"), "BillMeta.txt", 3, true, &errs, [&](const QStringList &v) -> QString {
+        auto it = m_bills.find(v[0]);
+        if (it == m_bills.end())
+            return QStringLiteral("unknown Bill ID %1").arg(v[0]);
+        it->superseded = (v[1] == QLatin1String("true"));
+        it->supersededBy = v[2];
+        return {};
+    });
+
+    // Cross checks
+    for (auto it = m_orders.begin(); it != m_orders.end(); ++it) {
+        OrderRecord &o = it.value();
+        const bool completed = (o.status == Status::Paid || o.status == Status::Archived);
+        if (completed) {
+            if (o.activeBillId.isEmpty() || !m_bills.contains(o.activeBillId)) {
+                // Fall back to the newest bill of this order that is not superseded.
+                QString pick;
+                for (const BillRecord &b : m_bills)
+                    if (b.orderId == o.orderId && !b.superseded && b.billId > pick)
+                        pick = b.billId;
+                if (pick.isEmpty())
+                    errs << QStringLiteral("Order %1 is %2 but has no active bill").arg(o.orderId, o.status);
+                else
+                    o.activeBillId = pick;
+            }
+            if (!o.paidAt.isValid())
+                errs << QStringLiteral("Order %1 is %2 but has no original payment time").arg(o.orderId, o.status);
+        }
+        if (o.status == Status::OnHold && !o.holdExpiry.isValid())
+            errs << QStringLiteral("Order %1 is on hold without an expiry").arg(o.orderId);
+    }
+
+    // Leftovers from an interrupted or failed commit keep checkout locked.
+    bool leftover = false;
+    for (const char *n : kFiles) {
+        for (const QString &suffix : {QStringLiteral(".bak"), QStringLiteral(".tmp")}) {
+            if (QFile::exists(path(QString::fromLatin1(n) + suffix))) {
+                leftover = true;
+                errs << QStringLiteral("%1%2 exists: an earlier save did not finish. Restore the .bak files "
+                                       "(or delete them after checking the data) before selling.")
+                            .arg(QString::fromLatin1(n), suffix);
+            }
+        }
+    }
+    m_locked = leftover;
+    return errs.isEmpty();
+}
+
+// =====================================================================
+//  Queries
+// =====================================================================
+
+bool CheckoutStorage::order(const QString &orderId, OrderRecord *out) const
+{
+    auto it = m_orders.constFind(orderId);
+    if (it == m_orders.constEnd())
+        return false;
+    if (out) *out = it.value();
     return true;
 }
 
-}  // namespace
+QList<OrderRecord> CheckoutStorage::ordersWithStatus(const QString &status) const
+{
+    QList<OrderRecord> r;
+    for (const OrderRecord &o : m_orders)
+        if (o.status == status)
+            r << o;
+    return r;
+}
 
-bool CheckoutStorage::save(const QString& dataDir, const Bill& bill,
-                           const CheckoutDetails& details, const QDateTime& now,
-                           CheckoutReceipt& receipt, QString* error) {
-    receipt = CheckoutReceipt{};  // clear at entry
-    if (error) error->clear();
-
-    // 1. Validate input -------------------------------------------------------
-    if (dataDir.isEmpty())
-        return fail(error, QStringLiteral("Data folder is not set"));
-    if (!now.isValid())
-        return fail(error, QStringLiteral("Invalid checkout time"));
-    if (!validateBill(bill, details, error)) return false;
-
-    QDir dir(dataDir);
-    if (!dir.exists() && !QDir().mkpath(dataDir))
-        return fail(error, QStringLiteral("Cannot create data folder"));
-
-    PendingFile order{QString::fromLatin1(kOrderFile),
-                      dir.filePath(QString::fromLatin1(kOrderFile))};
-    PendingFile detail{QString::fromLatin1(kDetailFile),
-                       dir.filePath(QString::fromLatin1(kDetailFile))};
-    PendingFile billF{QString::fromLatin1(kBillFile),
-                      dir.filePath(QString::fromLatin1(kBillFile))};
-    PendingFile product{QString::fromLatin1(kProductFile),
-                        dir.filePath(QString::fromLatin1(kProductFile))};
-
-    // 2. Read existing records and assign IDs (not published yet) -------------
-    if (!readAll(order.path, order.oldBytes, order.existed, error)) return false;
-    if (!readAll(detail.path, detail.oldBytes, detail.existed, error)) return false;
-    if (!readAll(billF.path, billF.oldBytes, billF.existed, error)) return false;
-    if (!readAll(product.path, product.oldBytes, product.existed, error)) return false;
-    if (!product.existed)
-        return fail(error, QStringLiteral("Product.txt: file not found"));
-
-    qint64 orderSeq = 0, billSeq = 0;
-    if (!nextSequence(order.oldBytes, order.name, 8, 6, kMaxOrderSeq, orderSeq, error))
+bool CheckoutStorage::bill(const QString &billId, BillRecord *out) const
+{
+    auto it = m_bills.constFind(billId);
+    if (it == m_bills.constEnd())
         return false;
-    if (!nextSequence(billF.oldBytes, billF.name, 9, 9, kMaxBillSeq, billSeq, error))
-        return false;
-
-    const QString orderId = QStringLiteral("%1%2")
-                                .arg(orderSeq, 6, 10, QLatin1Char('0'))
-                                .arg(now.date().day(), 2, 10, QLatin1Char('0'));
-    const QString billId = QStringLiteral("%1").arg(billSeq, 9, 10, QLatin1Char('0'));
-
-    // 3. Recheck stock against the latest Product.txt -------------------------
-    ProductCatalog catalog;
-    QString catErr;
-    if (!catalog.load(product.path, &catErr))
-        return fail(error, QStringLiteral("Product.txt: %1").arg(catErr));
-
-    Order temp;
-    for (const BillLine& l : bill.lines) {
-        Product latest;
-        if (!catalog.findByBarcode(l.item.product.barcode, latest) ||
-            latest.id != l.item.product.id)
-            return fail(error, QStringLiteral("Product %1 (%2) no longer matches the catalog")
-                                   .arg(l.item.product.id, l.item.product.barcode));
-        QString addErr;
-        if (!temp.add(latest, l.item.quantityMilli, &addErr))
-            return fail(error, QStringLiteral("Stock check failed for %1: %2")
-                                   .arg(latest.id, addErr));
-    }
-    // Apply deductions to a copy (id -> product with new stock).
-    QHash<QString, Product> updated;
-    for (const OrderItem& it : temp.items()) {
-        Product p = it.product;
-        if (it.quantityMilli > p.stockMilli)
-            return fail(error, QStringLiteral("Insufficient stock for %1").arg(p.id));
-        p.stockMilli -= it.quantityMilli;
-        updated.insert(p.id, p);
-    }
-
-    // 4. Serialize records ----------------------------------------------------
-    const QString orderRow = QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 #\n")
-        .arg(orderId,
-             now.toString(QStringLiteral("yyyy-MM-dd")),
-             now.toString(QStringLiteral("HH:mm:ss")),
-             quoted(details.customerName.trimmed()),
-             quoted(details.customerContact.trimmed()),
-             details.status,
-             formatMoney(details.paymentPaisa),
-             details.paymentMode,
-             quoted(details.merchantName.trimmed()));
-
-    QString detailRows;
-    QStringList billItems;
-    for (const BillLine& l : bill.lines) {
-        const Product& p = l.item.product;
-        const QString qty = formatQuantity(p.unit, l.item.quantityMilli);
-        detailRows += QStringLiteral("%1 %2 %3 %4\n").arg(orderId, p.id, p.barcode, qty);
-        billItems << QStringLiteral("%1 %2 %3 %4")
-                         .arg(p.acronym, formatMoney(p.pricePaisa),
-                              formatMoney(p.discountPaisa), qty);
-    }
-    const Amounts& t = bill.totals;
-    const QString billRow = QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 #\n")
-        .arg(billId, quoted(details.customerName.trimmed()), orderId,
-             billItems.join(QLatin1Char(' ')),
-             formatMoney(t.subtotalPaisa), formatMoney(t.taxPaisa),
-             formatMoney(t.discountPaisa), formatMoney(t.payablePaisa),
-             details.status);
-
-    order.newBytes = appended(order.oldBytes, orderRow);
-    detail.newBytes = appended(detail.oldBytes, detailRows);
-    billF.newBytes = appended(billF.oldBytes, billRow);
-    if (!rewriteProducts(product.oldBytes, updated, product.newBytes, error))
-        return false;
-
-    // 5. Commit with rollback -------------------------------------------------
-    QVector<PendingFile*> files{&order, &detail, &billF, &product};
-    for (int i = 0; i < files.size(); ++i) {
-        QString commitErr;
-        if (commitFile(*files[i], &commitErr)) continue;
-
-        // The failing QSaveFile leaves its target untouched; restore earlier ones.
-        QStringList restoreFailures;
-        for (int j = i - 1; j >= 0; --j)
-            if (!restoreFile(*files[j])) restoreFailures << files[j]->name;
-
-        QString msg = commitErr;
-        if (!restoreFailures.isEmpty()) {
-            receipt.recoveryRequired = true;
-            msg += QStringLiteral(" | Could not restore: %1. Check the data files "
-                                  "before retrying.")
-                       .arg(restoreFailures.join(QStringLiteral(", ")));
-        }
-        return fail(error, msg);
-    }
-
-    // 6. Publish IDs only after every write succeeded -------------------------
-    receipt.orderId = orderId;
-    receipt.billId = billId;
-    receipt.recoveryRequired = false;
+    if (out) *out = it.value();
     return true;
 }
 
-}  // namespace shop
+bool CheckoutStorage::activeBillForOrder(const QString &orderId, BillRecord *out) const
+{
+    auto o = m_orders.constFind(orderId);
+    if (o == m_orders.constEnd() || o->activeBillId.isEmpty())
+        return false;
+    return bill(o->activeBillId, out);
+}
+
+QList<BillRecord> CheckoutStorage::billHistory(const QString &orderId) const
+{
+    QList<BillRecord> r;
+    for (const BillRecord &b : m_bills)
+        if (b.orderId == orderId)
+            r << b;
+    return r; // QMap iterates by Bill ID, which grows with time
+}
+
+QList<BillRecord> CheckoutStorage::activeBills() const
+{
+    QList<BillRecord> r;
+    for (const OrderRecord &o : m_orders) {
+        if (o.status != Status::Paid && o.status != Status::Archived)
+            continue;
+        BillRecord b;
+        if (bill(o.activeBillId, &b))
+            r << b;
+    }
+    return r;
+}
+
+QHash<QString, qint64> CheckoutStorage::reservedByProduct(const QDateTime &now,
+                                                          const QString &excludeOrderId) const
+{
+    QHash<QString, qint64> r;
+    for (const OrderRecord &o : m_orders) {
+        if (o.status != Status::OnHold || o.orderId == excludeOrderId)
+            continue;
+        if (!o.holdExpiry.isValid() || o.holdExpiry <= now)
+            continue;
+        for (const OrderLine &l : o.lines)
+            r[l.productId] += l.qtyMilli;
+    }
+    return r;
+}
+
+qint64 CheckoutStorage::reservedStock(const QString &productId, const QDateTime &now) const
+{
+    return reservedByProduct(now).value(productId, 0);
+}
+
+qint64 CheckoutStorage::availableStock(const QString &productId, const QDateTime &now,
+                                       const QString &excludeOrderId)
+{
+    const qint64 phys = m_inv->physicalStock().value(productId, 0);
+    const qint64 avail = phys - reservedByProduct(now, excludeOrderId).value(productId, 0);
+    return avail < 0 ? 0 : avail;
+}
+
+QList<ReportOrder> CheckoutStorage::completedOrders() const
+{
+    QList<ReportOrder> r;
+    for (const OrderRecord &o : m_orders) {
+        if (o.status != Status::Paid && o.status != Status::Archived)
+            continue;
+        ReportOrder ro;
+        if (!bill(o.activeBillId, &ro.activeBill))
+            continue; // already reported by load()
+        ro.orderId = o.orderId;
+        ro.status = o.status;
+        ro.paidAt = o.paidAt;
+        ro.paymentMode = o.paymentMode;
+        for (const OrderLine &l : o.lines)
+            ro.qtyByProduct[l.productId] += l.qtyMilli;
+        r << ro;
+    }
+    return r;
+}
+
+QHash<QString, qint64> CheckoutStorage::soldQuantities() const
+{
+    QHash<QString, qint64> r;
+    for (const ReportOrder &o : completedOrders())
+        for (auto it = o.qtyByProduct.cbegin(); it != o.qtyByProduct.cend(); ++it)
+            r[it.key()] += it.value();
+    return r;
+}
+
+QString CheckoutStorage::nextBillId() const
+{
+    qint64 maxId = 0;
+    for (auto it = m_bills.cbegin(); it != m_bills.cend(); ++it)
+        maxId = qMax(maxId, it.key().toLongLong());
+    QString id;
+    do {
+        ++maxId;
+        id = QStringLiteral("%1").arg(maxId, 9, 10, QLatin1Char('0'));
+    } while (m_bills.contains(id));
+    return id;
+}
+
+// =====================================================================
+//  File images and coordinated commit
+// =====================================================================
+
+QList<CheckoutStorage::FileImage>
+CheckoutStorage::buildImages(const QMap<QString, OrderRecord> &orders,
+                             const QMap<QString, BillRecord> &bills) const
+{
+    QByteArray order, detail, snap, life, bill, bdetail, bmeta;
+    for (const OrderRecord &o : orders) {
+        order += Row().text(o.orderId).raw(formatDate(o.orderDate)).raw(formatTime(o.orderTime))
+                     .text(o.customerName).text(o.contact).text(o.status).money(o.paymentPaisa)
+                     .text(o.paymentMode).text(o.paymentMerchant).finish(true);
+        for (const OrderLine &l : o.lines) {
+            detail += Row().text(o.orderId).text(l.productId).text(l.barcode)
+                          .raw(formatQty(l.qtyMilli, l.weighted)).finish(false);
+            snap += Row().text(o.orderId).text(l.productId).text(l.acronym).money(l.unitPricePaisa)
+                        .money(l.taxPerUnitPaisa).money(l.discountPerUnitPaisa).finish(true);
+        }
+        life += Row().text(o.orderId).text(formatStamp(o.holdExpiry)).text(formatStamp(o.paidAt))
+                    .text(o.activeBillId).finish(true);
+    }
+    for (const BillRecord &b : bills) {
+        bill += Row().raw(b.billId).text(b.customerName).text(b.orderId).money(b.totalBeforeTax)
+                    .money(b.totalTax).money(b.totalProductDiscount).money(b.totalPayable)
+                    .money(b.amountReceived).money(b.balanceReturned).text(b.paymentStatus)
+                    .money(b.seasonalDiscount).money(b.specialDiscount).raw(formatDate(b.billDate))
+                    .raw(formatTime(b.billTime)).finish(true);
+        for (const BillLine &l : b.lines)
+            bdetail += Row().raw(b.billId).text(l.acronym).money(l.unitPricePaisa)
+                           .raw(formatQty(l.qtyMilli, l.weighted)).money(l.productDiscountPaisa).finish(true);
+        bmeta += Row().raw(b.billId).raw(b.superseded ? "true" : "false").text(b.supersededBy).finish(true);
+    }
+    return {{"Order.txt", order},       {"OrderDetail.txt", detail}, {"OrderSnapshot.txt", snap},
+            {"Lifecycle.txt", life},    {"Bill.txt", bill},          {"BillDetail.txt", bdetail},
+            {"BillMeta.txt", bmeta}};
+}
+
+bool CheckoutStorage::writeFile(const QString &p, const QByteArray &bytes, QString *error) const
+{
+    if (!m_faultFile.isEmpty() && !m_faultRecovery
+        && QFileInfo(p).fileName().startsWith(m_faultFile)) {
+        *error = QStringLiteral("cannot write %1 (simulated fault)").arg(QFileInfo(p).fileName());
+        return false;
+    }
+    QFile f(p);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        *error = QStringLiteral("cannot write %1: %2").arg(QFileInfo(p).fileName(), f.errorString());
+        return false;
+    }
+    if (f.write(bytes) != bytes.size() || !f.flush()) {
+        *error = QStringLiteral("short write to %1: %2").arg(QFileInfo(p).fileName(), f.errorString());
+        return false;
+    }
+    f.close();
+    return true;
+}
+
+Result CheckoutStorage::commitAll(const QMap<QString, OrderRecord> &orders,
+                                  const QMap<QString, BillRecord> &bills,
+                                  const QHash<QString, qint64> &stockChanges)
+{
+    if (m_locked) {
+        Result r = Result::failure(QStringLiteral("Checkout is locked after a failed save. Do not retry the sale; "
+                                                  "restart the app and check the data files first."));
+        r.recoveryFailed = true;
+        return r;
+    }
+
+    const QList<FileImage> images = buildImages(orders, bills);
+    auto cleanup = [&](bool bak) {
+        for (const FileImage &im : images) {
+            QFile::remove(path(im.name + ".tmp"));
+            if (bak) QFile::remove(path(im.name + ".bak"));
+        }
+    };
+
+    // 1. Stage every new file next to the old one. A failure here changes nothing.
+    for (const FileImage &im : images) {
+        QString err;
+        if (!writeFile(path(im.name + ".tmp"), im.bytes, &err)) {
+            cleanup(false);
+            return Result::failure(err + QStringLiteral(". Nothing was saved; the cart is unchanged, you can retry."));
+        }
+    }
+
+    // 2. Back up the current files.
+    QSet<QString> existed;
+    for (const FileImage &im : images) {
+        const QString cur = path(im.name), bak = path(im.name + ".bak");
+        QFile::remove(bak);
+        if (QFile::exists(cur)) {
+            if (!QFile::copy(cur, bak)) {
+                cleanup(true);
+                return Result::failure(QStringLiteral("cannot back up %1. Nothing was saved; you can retry.").arg(im.name));
+            }
+            existed.insert(im.name);
+        }
+    }
+
+    // 3. Apply stock first (it has its own all-or-nothing write), remember the old values.
+    QHash<QString, qint64> oldStock;
+    if (!stockChanges.isEmpty()) {
+        const QHash<QString, qint64> cur = m_inv->physicalStock();
+        for (auto it = stockChanges.cbegin(); it != stockChanges.cend(); ++it)
+            oldStock[it.key()] = cur.value(it.key(), 0);
+        QString err;
+        if (!m_inv->applyStock(stockChanges, &err)) {
+            cleanup(true);
+            return Result::failure(QStringLiteral("stock was not updated (%1). Nothing was saved; you can retry.").arg(err));
+        }
+    }
+
+    // 4. Swap files in. On any failure, roll everything back.
+    QStringList swapped;
+    QString swapError;
+    for (const FileImage &im : images) {
+        const QString cur = path(im.name), tmp = path(im.name + ".tmp");
+        bool ok = true;
+        if (!m_faultFile.isEmpty() && m_faultRecovery && im.name.startsWith(m_faultFile))
+            ok = false; // simulated dead disk
+        if (ok && QFile::exists(cur))
+            ok = QFile::remove(cur);
+        if (ok)
+            ok = QFile::rename(tmp, cur);
+        if (!ok) {
+            swapError = QStringLiteral("cannot replace %1").arg(im.name);
+            break;
+        }
+        swapped << im.name;
+    }
+
+    if (swapError.isEmpty()) {
+        cleanup(true);
+        m_orders = orders;
+        m_bills = bills;
+        return Result::success();
+    }
+
+    // ---- recovery ----
+    bool recovered = true;
+    QStringList toRestore = swapped;
+    // The file that failed may be half replaced (removed but not renamed): restore it too.
+    for (const FileImage &im : images)
+        if (!swapped.contains(im.name) && !QFile::exists(path(im.name)) && existed.contains(im.name))
+            toRestore << im.name;
+    for (const QString &name : toRestore) {
+        const QString cur = path(name), bak = path(name + ".bak");
+        if (m_faultRecovery && !m_faultFile.isEmpty()) { recovered = false; continue; }
+        QFile::remove(cur);
+        if (existed.contains(name)) {
+            if (!QFile::copy(bak, cur))
+                recovered = false;
+        }
+    }
+    if (!oldStock.isEmpty()) {
+        QString err;
+        if (m_faultRecovery || !m_inv->applyStock(oldStock, &err))
+            recovered = false;
+    }
+
+    if (recovered) {
+        cleanup(true);
+        return Result::failure(swapError + QStringLiteral(". All earlier changes were undone; you can retry."));
+    }
+    // Keep .bak files for manual repair and lock checkout so the sale cannot be sent twice.
+    for (const FileImage &im : images)
+        QFile::remove(path(im.name + ".tmp"));
+    m_locked = true;
+    Result r = Result::failure(swapError + QStringLiteral(" and the automatic undo also failed. "
+                               "Do NOT submit this sale again. Backups (*.bak) were kept in %1.").arg(m_dir));
+    r.recoveryFailed = true;
+    return r;
+}
+
+void CheckoutStorage::setFaultInjection(const QString &fileName, bool alsoFailRecovery)
+{
+    m_faultFile = fileName;
+    m_faultRecovery = alsoFailRecovery;
+}
+
+// =====================================================================
+//  Validation helpers
+// =====================================================================
+
+Result CheckoutStorage::checkLines(const OrderRecord &o, const QDateTime &now,
+                                   const QHash<QString, qint64> &oldQty,
+                                   const QHash<QString, qint64> &stock) const
+{
+    if (o.lines.isEmpty())
+        return Result::failure(QStringLiteral("Order %1 has no items.").arg(o.orderId));
+    const QHash<QString, qint64> reserved = reservedByProduct(now, o.orderId);
+    QHash<QString, qint64> wanted;
+    for (const OrderLine &l : o.lines) {
+        if (l.productId.isEmpty() || l.qtyMilli <= 0)
+            return Result::failure(QStringLiteral("Order %1 has an invalid line (%2).").arg(o.orderId, l.productId));
+        wanted[l.productId] += l.qtyMilli;
+    }
+    for (auto it = wanted.cbegin(); it != wanted.cend(); ++it) {
+        if (!stock.contains(it.key()))
+            return Result::failure(QStringLiteral("Product %1 is not in the catalog.").arg(it.key()));
+        const qint64 avail = stock.value(it.key()) - reserved.value(it.key(), 0);
+        const qint64 added = it.value() - oldQty.value(it.key(), 0);
+        if (added > avail)
+            return Result::failure(QStringLiteral("Not enough stock for %1: available %2, needed %3.")
+                                       .arg(it.key(), formatQty(qMax<qint64>(avail, 0), true),
+                                            formatQty(added, true)));
+    }
+    return Result::success();
+}
+
+// =====================================================================
+//  Lifecycle operations
+// =====================================================================
+
+Result CheckoutStorage::holdOrder(OrderRecord order, const QDateTime &now)
+{
+    auto cur = m_orders.constFind(order.orderId);
+    if (cur != m_orders.constEnd() && (cur->status == Status::Paid || cur->status == Status::Archived))
+        return Result::failure(QStringLiteral("Order %1 is already paid and cannot be held.").arg(order.orderId));
+    const Result chk = checkLines(order, now, {}, m_inv->physicalStock());
+    if (!chk.ok)
+        return chk;
+    order.status = Status::OnHold;
+    order.holdExpiry = now.addSecs(HoldMinutes * 60); // holding again always sets a new deadline
+    order.paidAt = QDateTime();
+    order.activeBillId.clear();
+    if (!order.orderDate.isValid()) order.orderDate = now.date();
+    if (!order.orderTime.isValid()) order.orderTime = now.time();
+    QMap<QString, OrderRecord> orders = m_orders;
+    orders[order.orderId] = order;
+    return commitAll(orders, m_bills, {});
+}
+
+Result CheckoutStorage::cancelOrder(const QString &orderId)
+{
+    auto it = m_orders.constFind(orderId);
+    if (it == m_orders.constEnd())
+        return Result::failure(QStringLiteral("Order %1 was not found.").arg(orderId));
+    if (it->status != Status::OnHold && it->status != Status::InProgress)
+        return Result::failure(QStringLiteral("Order %1 is %2 and cannot be cancelled.").arg(orderId, it->status));
+    QMap<QString, OrderRecord> orders = m_orders;
+    orders[orderId].status = Status::Cancelled;
+    orders[orderId].holdExpiry = QDateTime();
+    return commitAll(orders, m_bills, {}); // reservation released because status is no longer on-hold
+}
+
+Result CheckoutStorage::checkResume(const QString &orderId, const QDateTime &now, OrderRecord *out)
+{
+    auto it = m_orders.constFind(orderId);
+    if (it == m_orders.constEnd())
+        return Result::failure(QStringLiteral("Order %1 was not found.").arg(orderId));
+    if (it->status != Status::OnHold)
+        return Result::failure(QStringLiteral("Order %1 is %2, not on hold.").arg(orderId, it->status));
+    if (it->holdExpiry <= now) {
+        sweep(now);
+        return Result::failure(QStringLiteral("The hold on order %1 has expired and its stock was released.").arg(orderId));
+    }
+    if (out) *out = it.value();
+    return Result::success(); // the original expiry keeps running during resume
+}
+
+SweepResult CheckoutStorage::sweep(const QDateTime &now)
+{
+    SweepResult sr;
+    QMap<QString, OrderRecord> orders = m_orders;
+    QMap<QString, BillRecord> bills = m_bills;
+    for (OrderRecord &o : orders) {
+        if (o.status == Status::OnHold && o.holdExpiry.isValid() && o.holdExpiry <= now) {
+            o.status = Status::Expired;
+            sr.expiredOrders << o.orderId;
+        } else if (o.status == Status::Paid && o.paidAt.isValid()
+                   && o.paidAt.addSecs(qint64(ArchiveHours) * 3600) <= now) {
+            o.status = Status::Archived;
+            sr.archivedOrders << o.orderId;
+            auto b = bills.find(o.activeBillId);
+            if (b != bills.end())
+                b->paymentStatus = Status::Archived; // Bill.txt status follows the order
+        }
+    }
+    if (sr.expiredOrders.isEmpty() && sr.archivedOrders.isEmpty()) {
+        sr.result = Result::success();
+        return sr;
+    }
+    sr.result = commitAll(orders, bills, {});
+    if (!sr.result.ok) {
+        sr.expiredOrders.clear();
+        sr.archivedOrders.clear();
+    }
+    return sr;
+}
+
+Result CheckoutStorage::checkPaidEditWindow(const QString &orderId, const QDateTime &now) const
+{
+    auto it = m_orders.constFind(orderId);
+    if (it == m_orders.constEnd())
+        return Result::failure(QStringLiteral("Order %1 was not found.").arg(orderId));
+    if (it->status == Status::Archived)
+        return Result::failure(QStringLiteral("Order %1 is archived and can only be reprinted.").arg(orderId));
+    if (it->status != Status::Paid || !it->paidAt.isValid())
+        return Result::failure(QStringLiteral("Order %1 is not a paid order.").arg(orderId));
+    if (it->paidAt.addSecs(qint64(ArchiveHours) * 3600) <= now)
+        return Result::failure(QStringLiteral("The 168 hour edit window for order %1 has passed.").arg(orderId));
+    return Result::success();
+}
+
+static Result checkBillMatchesOrder(const OrderRecord &o, const BillRecord &b)
+{
+    if (b.orderId != o.orderId)
+        return Result::failure(QStringLiteral("Bill belongs to order %1, not %2.").arg(b.orderId, o.orderId));
+    if (b.lines.isEmpty())
+        return Result::failure(QStringLiteral("The bill has no item rows."));
+    if (b.amountReceived < b.totalPayable)
+        return Result::failure(QStringLiteral("Amount received %1 does not cover payable %2.")
+                                   .arg(formatPkr(b.amountReceived), formatPkr(b.totalPayable)));
+    if (b.balanceReturned != b.amountReceived - b.totalPayable)
+        return Result::failure(QStringLiteral("Balance returned does not equal received minus payable."));
+    return Result::success();
+}
+
+Result CheckoutStorage::commitPaidSale(OrderRecord order, BillRecord bill, const QDateTime &now,
+                                       QString *assignedBillId)
+{
+    if (m_locked)
+        return commitAll({}, {}, {}); // returns the lock message
+
+    auto cur = m_orders.constFind(order.orderId);
+    if (cur != m_orders.constEnd()) {
+        if (cur->status == Status::Paid || cur->status == Status::Archived)
+            return Result::failure(QStringLiteral("Order %1 is already paid.").arg(order.orderId));
+        if (cur->status == Status::OnHold && cur->holdExpiry <= now)
+            return Result::failure(QStringLiteral("The hold on order %1 expired. Resume or rebuild the cart.").arg(order.orderId));
+    }
+    const Result billChk = checkBillMatchesOrder(order, bill);
+    if (!billChk.ok)
+        return billChk;
+
+    // Reload live stock; this order's own reservation is excluded by checkLines().
+    const QHash<QString, qint64> stock = m_inv->physicalStock();
+    const Result chk = checkLines(order, now, {}, stock);
+    if (!chk.ok)
+        return chk;
+
+    QHash<QString, qint64> changes;
+    for (const OrderLine &l : order.lines)
+        changes[l.productId] = changes.value(l.productId, stock.value(l.productId)) - l.qtyMilli;
+
+    bill.billId = nextBillId();
+    bill.paymentStatus = Status::Paid;
+    if (!bill.billDate.isValid()) bill.billDate = now.date();
+    if (!bill.billTime.isValid()) bill.billTime = now.time();
+    if (!order.orderDate.isValid()) order.orderDate = now.date();
+    if (!order.orderTime.isValid()) order.orderTime = now.time();
+    order.status = Status::Paid;
+    order.paidAt = now;
+    order.holdExpiry = QDateTime();
+    order.activeBillId = bill.billId;
+    order.paymentPaisa = bill.totalPayable;
+    bill.customerName = order.customerName;
+
+    QMap<QString, OrderRecord> orders = m_orders;
+    QMap<QString, BillRecord> bills = m_bills;
+    orders[order.orderId] = order;
+    bills[bill.billId] = bill;
+
+    const Result r = commitAll(orders, bills, changes);
+    if (r.ok && assignedBillId)
+        *assignedBillId = bill.billId;
+    return r;
+}
+
+Result CheckoutStorage::commitPaidRevision(OrderRecord revised, BillRecord replacement,
+                                           const QDateTime &now, QString *assignedBillId)
+{
+    if (m_locked)
+        return commitAll({}, {}, {});
+
+    // The window is checked again at save, using the original payment timestamp.
+    const Result window = checkPaidEditWindow(revised.orderId, now);
+    if (!window.ok)
+        return window;
+    const OrderRecord &old = m_orders[revised.orderId];
+
+    const Result billChk = checkBillMatchesOrder(revised, replacement);
+    if (!billChk.ok)
+        return billChk;
+
+    QHash<QString, qint64> oldQty, newQty;
+    for (const OrderLine &l : old.lines) oldQty[l.productId] += l.qtyMilli;
+    for (const OrderLine &l : revised.lines) newQty[l.productId] += l.qtyMilli;
+
+    const QHash<QString, qint64> stock = m_inv->physicalStock();
+    const Result chk = checkLines(revised, now, oldQty, stock); // revalidates only the added part
+    if (!chk.ok)
+        return chk;
+
+    // physical stock changes by old quantity minus new quantity, by Product ID
+    QHash<QString, qint64> changes;
+    QSet<QString> ids;
+    for (auto it = oldQty.cbegin(); it != oldQty.cend(); ++it) ids.insert(it.key());
+    for (auto it = newQty.cbegin(); it != newQty.cend(); ++it) ids.insert(it.key());
+    for (const QString &id : ids) {
+        const qint64 delta = oldQty.value(id, 0) - newQty.value(id, 0);
+        if (delta == 0) continue;
+        if (!stock.contains(id))
+            return Result::failure(QStringLiteral("Product %1 is not in the catalog.").arg(id));
+        const qint64 ns = stock.value(id) + delta;
+        if (ns < 0)
+            return Result::failure(QStringLiteral("Stock for %1 would go negative.").arg(id));
+        changes[id] = ns;
+    }
+
+    replacement.billId = nextBillId();
+    replacement.paymentStatus = Status::Paid;
+    replacement.customerName = revised.customerName;
+    if (!replacement.billDate.isValid()) replacement.billDate = now.date();
+    if (!replacement.billTime.isValid()) replacement.billTime = now.time();
+
+    revised.status = Status::Paid;
+    revised.paidAt = old.paidAt;               // original payment time never moves
+    revised.orderDate = old.orderDate;
+    revised.orderTime = old.orderTime;
+    revised.holdExpiry = QDateTime();
+    revised.activeBillId = replacement.billId;
+    revised.paymentPaisa = replacement.totalPayable;
+
+    QMap<QString, OrderRecord> orders = m_orders;
+    QMap<QString, BillRecord> bills = m_bills;
+    auto prev = bills.find(old.activeBillId);
+    if (prev != bills.end()) {                  // keep history, only the new bill is active
+        prev->superseded = true;
+        prev->supersededBy = replacement.billId;
+    }
+    orders[revised.orderId] = revised;
+    bills[replacement.billId] = replacement;
+
+    const Result r = commitAll(orders, bills, changes);
+    if (r.ok && assignedBillId)
+        *assignedBillId = replacement.billId;
+    return r;
+}
+
+} // namespace store
+// Runs the page 9 "checks to run" plus the worked checkout from page 10.
+#include "../CheckoutStorage.h"
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
+#include <iostream>
+
+using namespace store;
+
+static int g_fail = 0;
+#define CHECK(c) do { if (!(c)) { ++g_fail; std::cerr << "FAIL line " << __LINE__ << ": " #c "\n"; } } while (0)
+
+// Stand-in for Anaya's ProductCatalog.
+struct FakeInventory : IInventory {
+    QHash<QString, qint64> stock;
+    bool failApply = false;
+    QHash<QString, qint64> physicalStock() override { return stock; }
+    bool applyStock(const QHash<QString, qint64> &s, QString *err) override {
+        if (failApply) { *err = "inventory unwritable"; return false; }
+        for (auto it = s.cbegin(); it != s.cend(); ++it) stock[it.key()] = it.value();
+        return true;
+    }
+};
+
+static OrderRecord makeOrder(const QString &id, qint64 qtyMilli, const QString &pid = "P001")
+{
+    OrderRecord o;
+    o.orderId = id;
+    o.customerName = "Ali Khan";
+    o.paymentMode = "cash";
+    OrderLine l;
+    l.productId = pid; l.barcode = "123456"; l.qtyMilli = qtyMilli; l.acronym = "MILK";
+    l.unitPricePaisa = 20000; l.taxPerUnitPaisa = 1000; l.discountPerUnitPaisa = 500;
+    o.lines << l;
+    return o;
+}
+
+static BillRecord workedBill(const QString &orderId)
+{
+    BillRecord b;
+    b.orderId = orderId; b.customerName = "Ali Khan";
+    b.totalBeforeTax = 40000; b.totalTax = 2000; b.totalProductDiscount = 1000;
+    b.seasonalDiscount = 3900; b.specialDiscount = 1755; b.totalPayable = 35345;
+    b.amountReceived = 50000; b.balanceReturned = 14655;
+    b.billDate = QDate(2026, 12, 1); b.billTime = QTime(10, 30, 0);
+    BillLine l; l.acronym = "MILK"; l.unitPricePaisa = 20000; l.qtyMilli = 2000; l.productDiscountPaisa = 1000;
+    b.lines << l;
+    return b;
+}
+
+static QString slurp(const QString &p) { QFile f(p); f.open(QIODevice::ReadOnly); return QString::fromUtf8(f.readAll()); }
+
+int main(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    const QDateTime t0(QDate(2026, 12, 1), QTime(10, 30, 0));
+
+    // ---- worked checkout, file format, restart ----
+    {
+        QTemporaryDir dir; FakeInventory inv; inv.stock["P001"] = 10000;
+        CheckoutStorage s(dir.path(), &inv); CHECK(s.load());
+        QString id;
+        Result r = s.commitPaidSale(makeOrder("00000101", 2000), workedBill("00000101"), t0, &id);
+        CHECK(r.ok); CHECK(id == "000000001"); CHECK(inv.stock["P001"] == 8000);
+        CHECK(slurp(dir.filePath("Bill.txt")) ==
+              "000000001 \"Ali Khan\" 00000101 400.00 20.00 10.00 353.45 500.00 146.55 paid 39.00 17.55 2026-12-01 10:30:00 #\n");
+        CHECK(slurp(dir.filePath("BillDetail.txt")) == "000000001 MILK 200.00 2 10.00 #\n");
+        CHECK(slurp(dir.filePath("OrderDetail.txt")) == "00000101 P001 123456 2\n");
+        // paying twice is refused
+        CHECK(!s.commitPaidSale(makeOrder("00000101", 2000), workedBill("00000101"), t0).ok);
+
+        CheckoutStorage s2(dir.path(), &inv); CHECK(s2.load());
+        BillRecord b; CHECK(s2.activeBillForOrder("00000101", &b)); CHECK(b.totalPayable == 35345);
+        CHECK(b.lines.size() == 1 && b.lines[0].qtyMilli == 2000);
+
+        // ---- paid revision: 2 -> 3 pieces ----
+        BillRecord nb = workedBill("00000101"); nb.lines[0].qtyMilli = 3000;
+        QString id2;
+        r = s2.commitPaidRevision(makeOrder("00000101", 3000), nb, t0.addSecs(3600), &id2);
+        CHECK(r.ok); CHECK(id2 == "000000002"); CHECK(inv.stock["P001"] == 7000);
+        CHECK(s2.activeBills().size() == 1);
+        CHECK(s2.billHistory("00000101").size() == 2);
+        BillRecord old; CHECK(s2.bill("000000001", &old)); CHECK(old.superseded && old.supersededBy == "000000002");
+        OrderRecord po; s2.order("00000101", &po); CHECK(po.paidAt == t0); // original timestamp kept
+        CHECK(s2.soldQuantities().value("P001") == 3000);
+        // window: 169 hours after original payment
+        CHECK(!s2.checkPaidEditWindow("00000101", t0.addSecs(169 * 3600)).ok);
+        CHECK(!s2.commitPaidRevision(makeOrder("00000101", 1000), nb, t0.addSecs(169 * 3600)).ok);
+        // archive
+        SweepResult sw = s2.sweep(t0.addSecs(168 * 3600));
+        CHECK(sw.archivedOrders == QStringList{"00000101"});
+        BillRecord ab; s2.activeBillForOrder("00000101", &ab); CHECK(ab.paymentStatus == "archived");
+        CHECK(s2.activeBills().size() == 1 && s2.completedOrders().size() == 1);
+    }
+
+    // ---- holds survive restart, expire, and reserve stock ----
+    {
+        QTemporaryDir dir; FakeInventory inv; inv.stock["P001"] = 10000;
+        CheckoutStorage s(dir.path(), &inv); s.load();
+        CHECK(s.holdOrder(makeOrder("A1", 4000), t0).ok);
+        CHECK(s.holdOrder(makeOrder("A2", 3000), t0.addSecs(60)).ok);
+        CHECK(!s.holdOrder(makeOrder("A3", 4000), t0).ok);       // only 3 available
+        CheckoutStorage r(dir.path(), &inv); CHECK(r.load());
+        CHECK(r.reservedStock("P001", t0.addSecs(120)) == 7000);
+        CHECK(r.availableStock("P001", t0.addSecs(120)) == 3000);
+        CHECK(r.availableStock("P001", t0.addSecs(120), "A1") == 7000); // own entitlement on resume
+        OrderRecord held; CHECK(r.checkResume("A1", t0.addSecs(600), &held).ok);
+        CHECK(held.holdExpiry == t0.addSecs(30 * 60));                   // timer keeps running
+        // sell the resumed order
+        BillRecord b = workedBill("A1"); b.lines[0].qtyMilli = 4000;
+        CHECK(r.commitPaidSale(held, b, t0.addSecs(900)).ok);
+        CHECK(inv.stock["P001"] == 6000 && r.reservedStock("P001", t0.addSecs(900)) == 3000);
+        // cancellation releases
+        CHECK(r.cancelOrder("A2").ok); CHECK(r.reservedStock("P001", t0.addSecs(900)) == 0);
+        // expiry
+        CHECK(r.holdOrder(makeOrder("A4", 1000), t0).ok);
+        SweepResult sw = r.sweep(t0.addSecs(31 * 60));
+        CHECK(sw.expiredOrders == QStringList{"A4"});
+        CHECK(!r.checkResume("A4", t0.addSecs(32 * 60), nullptr).ok);
+    }
+
+    // ---- failed saves ----
+    {
+        QTemporaryDir dir; FakeInventory inv; inv.stock["P001"] = 10000;
+        CheckoutStorage s(dir.path(), &inv); s.load();
+        s.setFaultInjection("Bill.txt");
+        Result r = s.commitPaidSale(makeOrder("B1", 2000), workedBill("B1"), t0);
+        CHECK(!r.ok); CHECK(!r.recoveryFailed); CHECK(inv.stock["P001"] == 10000);
+        CHECK(!QFile::exists(dir.filePath("Order.txt")));        // nothing half written
+        s.setFaultInjection("");
+        CHECK(s.commitPaidSale(makeOrder("B1", 2000), workedBill("B1"), t0).ok); // retry works
+
+        // swap fails midway, recovery works
+        inv.failApply = true;
+        CHECK(!s.commitPaidSale(makeOrder("B2", 1000), workedBill("B2"), t0).ok);
+        inv.failApply = false; CHECK(inv.stock["P001"] == 8000);
+
+        // swap fails and recovery fails: locked, no second submit
+        s.setFaultInjection("Bill.txt", true);
+        r = s.commitPaidSale(makeOrder("B3", 1000), workedBill("B3"), t0);
+        CHECK(!r.ok && r.recoveryFailed && s.isLocked());
+        s.setFaultInjection("");
+        CHECK(!s.commitPaidSale(makeOrder("B3", 1000), workedBill("B3"), t0).ok);
+    }
+
+    // ---- malformed input gives useful errors ----
+    {
+        QTemporaryDir dir; FakeInventory inv;
+        QFile f(dir.filePath("Order.txt")); f.open(QIODevice::WriteOnly);
+        f.write("00000101 2026-12-01 10:30:00 \"Ali Khan\" \"\" paid 12x.00 cash \"\" #\nshort row #\n");
+        f.close();
+        CheckoutStorage s(dir.path(), &inv);
+        CHECK(!s.load());
+        CHECK(s.loadErrors().size() == 2);
+        for (const QString &e : s.loadErrors()) std::cout << "  load error: " << e.toStdString() << "\n";
+    }
+
+    std::cout << (g_fail ? "SOME TESTS FAILED\n" : "ALL TESTS PASSED\n");
+    return g_fail ? 1 : 0;
+}
