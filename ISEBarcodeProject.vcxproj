@@ -148,7 +148,7 @@
     <ClInclude Include="include\ManagerAccess.h" />
     <ClInclude Include="include\ManagerWindow.h" />
     <ClInclude Include="include\Order.h" />
-    <ClInclude Include="include\OrderDialog.h" />
+<QtMoc Include="include\OrderDialog.h" />
     <ClInclude Include="include\OrderStorage.h" />
     <ClInclude Include="include\PaymentDialog.h" />
     <ClInclude Include="include\Product.h" />
