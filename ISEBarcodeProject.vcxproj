@@ -129,6 +129,7 @@
     <ClCompile Include="src\Reports.cpp" />
     <ClCompile Include="src\ScanDialog.cpp" />
     <ClCompile Include="src\SeasonDiscounts.cpp" />
+    <ClCompile Include="src\SeasonsDialog.cpp" />
     <QtRcc Include="ISEBarcodeProject.qrc" />
     <QtUic Include="ISEBarcodeProject.ui" />
     <QtMoc Include="ISEBarcodeProject.h" />
@@ -156,6 +157,7 @@
     <ClInclude Include="include\Reports.h" />
     <ClInclude Include="include\ScanDialog.h" />
     <ClInclude Include="include\SeasonDiscounts.h" />
+    <ClInclude Include="include\SeasonsDialog.h" />
     <QtMoc Include="include\CameraCapture.h" />
     <ClInclude Include="include\Bill.h" />
     <ClInclude Include="include\BillCalculator.h" />
