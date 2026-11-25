@@ -16,6 +16,10 @@
 
 namespace store {
 
+namespace {
+constexpr int maxSpecialDiscountBasisPoints = 800;
+}
+
 // =====================================================================
 //  Locale independent formatting and parsing
 // =====================================================================
@@ -181,7 +185,7 @@ private:
 using RowFn = std::function<QString(const QStringList &)>;
 
 void readTable(const QString &path, const QString &name, int fields, bool hasHash,
-               QStringList *errors, const RowFn &fn)
+               QStringList *errors, const RowFn &fn, int legacyFields = -1)
 {
     QFile f(path);
     if (!f.exists())
@@ -211,7 +215,7 @@ void readTable(const QString &path, const QString &name, int fields, bool hasHas
             }
             toks.removeLast();
         }
-        if (toks.size() != fields) {
+        if (toks.size() != fields && toks.size() != legacyFields) {
             fail(QStringLiteral("expected %1 fields, found %2").arg(fields).arg(toks.size()));
             continue;
         }
@@ -308,7 +312,7 @@ bool CheckoutStorage::load()
         return QStringLiteral("snapshot for product %1 has no order line").arg(v[1]);
     });
 
-    readTable(path("Lifecycle.txt"), "Lifecycle.txt", 4, true, &errs, [&](const QStringList &v) -> QString {
+    readTable(path("Lifecycle.txt"), "Lifecycle.txt", 5, true, &errs, [&](const QStringList &v) -> QString {
         auto it = m_orders.find(v[0]);
         if (it == m_orders.end())
             return QStringLiteral("unknown Order ID %1").arg(v[0]);
@@ -317,8 +321,15 @@ bool CheckoutStorage::load()
         if ((!v[1].isEmpty() && !it->holdExpiry.isValid()) || (!v[2].isEmpty() && !it->paidAt.isValid()))
             return QStringLiteral("bad timestamp");
         it->activeBillId = v[3];
+        if (v.size() == 5) {
+            bool valid = false;
+            const int rate = v[4].toInt(&valid);
+            if (!valid || rate < 0 || rate > maxSpecialDiscountBasisPoints)
+                return QStringLiteral("invalid approved special discount");
+            it->approvedSpecialBasisPoints = rate;
+        }
         return {};
-    });
+    }, 4);
 
     // Bills
     readTable(path("Bill.txt"), "Bill.txt", 14, true, &errs, [&](const QStringList &v) -> QString {
@@ -358,14 +369,15 @@ bool CheckoutStorage::load()
         return {};
     });
 
-    readTable(path("BillMeta.txt"), "BillMeta.txt", 3, true, &errs, [&](const QStringList &v) -> QString {
+    readTable(path("BillMeta.txt"), "BillMeta.txt", 5, true, &errs, [&](const QStringList &v) -> QString {
         auto it = m_bills.find(v[0]);
         if (it == m_bills.end())
             return QStringLiteral("unknown Bill ID %1").arg(v[0]);
         it->superseded = (v[1] == QLatin1String("true"));
         it->supersededBy = v[2];
+        if (v.size() == 5) { it->paymentMode = v[3]; it->paymentMerchant = v[4]; }
         return {};
-    });
+    }, 3);
 
     // Cross checks
     for (auto it = m_orders.begin(); it != m_orders.end(); ++it) {
@@ -579,7 +591,7 @@ CheckoutStorage::buildImages(const QMap<QString, OrderRecord> &orders,
                         .money(l.taxPerUnitPaisa).money(l.discountPerUnitPaisa).finish(true);
         }
         life += Row().text(o.orderId).text(formatStamp(o.holdExpiry)).text(formatStamp(o.paidAt))
-                    .text(o.activeBillId).finish(true);
+                    .text(o.activeBillId).raw(QString::number(o.approvedSpecialBasisPoints)).finish(true);
     }
     for (const BillRecord &b : bills) {
         bill += Row().raw(b.billId).text(b.customerName).text(b.orderId).money(b.totalBeforeTax)
@@ -590,7 +602,8 @@ CheckoutStorage::buildImages(const QMap<QString, OrderRecord> &orders,
         for (const BillLine &l : b.lines)
             bdetail += Row().raw(b.billId).text(l.acronym).money(l.unitPricePaisa)
                            .raw(formatQty(l.qtyMilli, l.weighted)).money(l.productDiscountPaisa).finish(true);
-        bmeta += Row().raw(b.billId).raw(b.superseded ? "true" : "false").text(b.supersededBy).finish(true);
+        bmeta += Row().raw(b.billId).raw(b.superseded ? "true" : "false").text(b.supersededBy)
+                     .text(b.paymentMode).text(b.paymentMerchant).finish(true);
     }
     return {{"Order.txt", order},       {"OrderDetail.txt", detail}, {"OrderSnapshot.txt", snap},
             {"Lifecycle.txt", life},    {"Bill.txt", bill},          {"BillDetail.txt", bdetail},
@@ -783,18 +796,29 @@ Result CheckoutStorage::checkLines(const OrderRecord &o, const QDateTime &now,
 
 Result CheckoutStorage::holdOrder(OrderRecord order, const QDateTime &now)
 {
+    return saveOpenOrder(order, now, true);
+}
+
+Result CheckoutStorage::saveDraft(OrderRecord order, const QDateTime& now)
+{
+    return saveOpenOrder(order, now, false);
+}
+
+Result CheckoutStorage::saveOpenOrder(OrderRecord order, const QDateTime& now, bool reserve)
+{
     if (m_locked)
         return commitAll({}, {}, {});
     if (!m_inv || !now.isValid() || order.orderId.isEmpty())
         return Result::failure(QStringLiteral("A hold requires an order ID, a valid time, and an inventory source."));
     auto cur = m_orders.constFind(order.orderId);
-    if (cur != m_orders.constEnd() && (cur->status == Status::Paid || cur->status == Status::Archived))
-        return Result::failure(QStringLiteral("Order %1 is already paid and cannot be held.").arg(order.orderId));
+    if (cur != m_orders.constEnd() && cur->status != Status::InProgress &&
+        (cur->status != Status::OnHold || cur->holdExpiry <= now))
+        return Result::failure(QStringLiteral("Order %1 is no longer open.").arg(order.orderId));
     const Result chk = checkLines(order, now, {}, m_inv->physicalStock());
     if (!chk.ok)
         return chk;
-    order.status = Status::OnHold;
-    order.holdExpiry = now.addSecs(HoldMinutes * 60); // holding again always sets a new deadline
+    order.status = reserve ? Status::OnHold : Status::InProgress;
+    order.holdExpiry = reserve ? now.addSecs(HoldMinutes * 60) : QDateTime();
     order.paidAt = QDateTime();
     order.activeBillId.clear();
     if (!order.orderDate.isValid()) order.orderDate = now.date();
@@ -902,8 +926,8 @@ Result CheckoutStorage::commitPaidSale(OrderRecord order, BillRecord bill, const
 
     auto cur = m_orders.constFind(order.orderId);
     if (cur != m_orders.constEnd()) {
-        if (cur->status == Status::Paid || cur->status == Status::Archived)
-            return Result::failure(QStringLiteral("Order %1 is already paid.").arg(order.orderId));
+        if (cur->status != Status::OnHold && cur->status != Status::InProgress)
+            return Result::failure(QStringLiteral("Order %1 is no longer open.").arg(order.orderId));
         if (cur->status == Status::OnHold && cur->holdExpiry <= now)
             return Result::failure(QStringLiteral("The hold on order %1 expired. Resume or rebuild the cart.").arg(order.orderId));
     }
@@ -935,6 +959,8 @@ Result CheckoutStorage::commitPaidSale(OrderRecord order, BillRecord bill, const
     order.activeBillId = bill.billId;
     order.paymentPaisa = bill.totalPayable;
     bill.customerName = order.customerName;
+    bill.paymentMode = order.paymentMode;
+    bill.paymentMerchant = order.paymentMerchant;
 
     QMap<QString, OrderRecord> orders = m_orders;
     QMap<QString, BillRecord> bills = m_bills;
@@ -995,6 +1021,8 @@ Result CheckoutStorage::commitPaidRevision(OrderRecord revised, BillRecord repla
         return Result::failure(QStringLiteral("All nine-digit bill IDs have been used."));
     replacement.paymentStatus = Status::Paid;
     replacement.customerName = revised.customerName;
+    replacement.paymentMode = revised.paymentMode;
+    replacement.paymentMerchant = revised.paymentMerchant;
     if (!replacement.billDate.isValid()) replacement.billDate = now.date();
     if (!replacement.billTime.isValid()) replacement.billTime = now.time();
 
@@ -1010,6 +1038,10 @@ Result CheckoutStorage::commitPaidRevision(OrderRecord revised, BillRecord repla
     QMap<QString, BillRecord> bills = m_bills;
     auto prev = bills.find(old.activeBillId);
     if (prev != bills.end()) {                  // keep history, only the new bill is active
+        if (prev->paymentMode.isEmpty()) {
+            prev->paymentMode = old.paymentMode;
+            prev->paymentMerchant = old.paymentMerchant;
+        }
         prev->superseded = true;
         prev->supersededBy = replacement.billId;
     }
@@ -1068,6 +1100,75 @@ private:
 
 } // namespace
 
+static store::OrderLine snapshotLine(const OrderItem& item)
+{
+    const Product& p = item.product;
+    return {p.id, p.barcode, item.quantityMilli, p.unit == Unit::Weight, p.acronym,
+            p.pricePaisa, p.taxPaisa, p.discountPaisa};
+}
+
+static bool currentCart(store::CheckoutStorage& storage, const store::OrderRecord& before,
+                        store::OrderRecord& record, QString& error)
+{
+    if (!storage.order(before.orderId,&record) || record.status != before.status ||
+        (record.status != store::Status::OnHold && record.status != store::Status::InProgress)) {
+        error = "This order is no longer open. Reopen the order list."; return false;
+    }
+    if (record.status == store::Status::OnHold) {
+        const auto result = storage.checkResume(record.orderId,QDateTime::currentDateTime(),nullptr);
+        if (!result.ok) { error = result.error; return false; }
+    }
+    bool same = before.customerName == record.customerName && before.contact == record.contact &&
+                before.holdExpiry == record.holdExpiry &&
+                before.approvedSpecialBasisPoints == record.approvedSpecialBasisPoints &&
+                before.lines.size() == record.lines.size();
+    for (qsizetype i=0; same && i<record.lines.size(); ++i) {
+        const auto& a = before.lines.at(i);
+        const auto& b = record.lines.at(i);
+        same = a.productId == b.productId && a.barcode == b.barcode && a.qtyMilli == b.qtyMilli &&
+               a.unitPricePaisa == b.unitPricePaisa && a.discountPerUnitPaisa == b.discountPerUnitPaisa &&
+               a.taxPerUnitPaisa == b.taxPerUnitPaisa && a.weighted == b.weighted && a.acronym == b.acronym;
+    }
+    if (!same) error = "This order changed. Reopen it before saving.";
+    return same;
+}
+
+bool CheckoutStorage::saveCart(const QString& dir, const Order& cart, const QString& customer,
+                               const QString& contact, const store::OrderRecord& previous,
+                               bool reserve, int approvedSpecialBasisPoints, QString& error)
+{
+    QLockFile lock(QDir(dir).filePath(".checkout.lock"));
+    if (!lock.tryLock(0)) { error = QStringLiteral("Checkout is busy. Try again."); return false; }
+    CheckoutInventory inventory(dir);
+    store::CheckoutStorage storage(dir, &inventory);
+    if (!storage.load()) { error = storage.loadErrors().join('\n'); return false; }
+    const auto now = QDateTime::currentDateTime();
+    store::OrderRecord record;
+    if (cart.orderId().isEmpty()) record.orderId = storage.nextOrderId(now.date());
+    else if (!currentCart(storage, previous, record, error)) return false;
+    record.lines.clear();
+    for (const auto& item : cart.items()) record.lines.append(snapshotLine(item));
+    record.customerName = customer;
+    record.contact = contact;
+    record.approvedSpecialBasisPoints = qBound(0, approvedSpecialBasisPoints, store::maxSpecialDiscountBasisPoints);
+    const auto result = reserve ? storage.holdOrder(record, now) : storage.saveDraft(record, now);
+    error = result.error;
+    return result.ok;
+}
+
+bool CheckoutStorage::cancelCart(const QString& dir, const store::OrderRecord& previous, QString& error)
+{
+    QLockFile lock(QDir(dir).filePath(".checkout.lock"));
+    if (!lock.tryLock(0)) { error = QStringLiteral("Checkout is busy. Try again."); return false; }
+    store::CheckoutStorage storage(dir, nullptr);
+    if (!storage.load()) { error = storage.loadErrors().join('\n'); return false; }
+    store::OrderRecord held;
+    if (!currentCart(storage, previous, held, error)) return false;
+    const auto result = storage.cancelOrder(previous.orderId);
+    error = result.error;
+    return result.ok;
+}
+
 bool CheckoutStorage::save(const QString& dataDir, const Bill& bill,
                            const CheckoutDetails& details, const QDateTime& now,
                            CheckoutReceipt& receipt, QString* error)
@@ -1112,11 +1213,23 @@ bool CheckoutStorage::save(const QString& dataDir, const Bill& bill,
     }
 
     store::OrderRecord order;
-    order.orderId = storage.nextOrderId(now.date());
+    const bool revision = !details.expectedBillId.isEmpty();
+    if (details.orderId.isEmpty()) {
+        order.orderId = storage.nextOrderId(now.date());
+    } else if (revision) {
+        if (!storage.order(details.orderId, &order) || order.activeBillId != details.expectedBillId)
+            return fail(QStringLiteral("This bill has changed. Reopen it for fresh approval."));
+    } else {
+        QString problem;
+        if (!currentCart(storage, details.previous, order, problem))
+            return fail(problem);
+    }
+    order.lines.clear();
     if (order.orderId.isEmpty())
         return fail(QStringLiteral("All order IDs have been used."));
     order.customerName = customer;
     order.contact = details.customerContact.trimmed();
+    order.approvedSpecialBasisPoints = bill.specialBasisPoints;
     order.paymentMode = mode;
     order.paymentMerchant = mode == QStringLiteral("cash") ? QString() : merchant;
 
@@ -1134,17 +1247,14 @@ bool CheckoutStorage::save(const QString& dataDir, const Bill& bill,
     for (const BillLine& line : bill.lines) {
         const Product& product = line.item.product;
         Product latest;
-        if (!catalog.findById(product.id, latest) || latest.barcode != product.barcode
+        if (!catalog.findById(product.id, latest) || (!revision && latest.barcode != product.barcode)
             || latest.unit != product.unit) {
             return fail(QStringLiteral("Product %1 changed in the catalog. Re-add it to the cart.")
                 .arg(product.id));
         }
 
         const bool weighted = product.unit == Unit::Weight;
-        order.lines.append(store::OrderLine{
-            product.id, product.barcode, line.item.quantityMilli, weighted,
-            product.acronym, product.pricePaisa, product.taxPaisa, product.discountPaisa
-        });
+        order.lines.append(snapshotLine(line.item));
         saved.lines.append(store::BillLine{
             product.acronym, product.pricePaisa, line.item.quantityMilli, weighted,
             line.amounts.discountPaisa
@@ -1152,7 +1262,8 @@ bool CheckoutStorage::save(const QString& dataDir, const Bill& bill,
     }
 
     QString billId;
-    const store::Result result = storage.commitPaidSale(order, saved, now, &billId);
+    const auto result = revision ? storage.commitPaidRevision(order, saved, now, &billId)
+                                 : storage.commitPaidSale(order, saved, now, &billId);
     receipt.recoveryRequired = result.recoveryFailed;
     if (!result.ok)
         return fail(result.error);
