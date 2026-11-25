@@ -476,21 +476,4 @@ namespace shop {
         }
     }
 
-    void openOrderDialog(QWidget* parent, const QString& dataDir) {
-        ProductCatalog catalog;
-        QString error;
-        if (!catalog.load(QDir(dataDir).filePath("Product.txt"), &error)) {
-            QMessageBox::warning(parent, "Products", error);
-            return;
-        }
-
-        OrderDialog dialog(parent);
-        dialog.setBarcodeLookup([&catalog](const QString& barcode, Product& product) {
-            return catalog.findByBarcode(barcode, product);
-            });
-        dialog.setProductLookup([&catalog](const QString& id, Product& product) {
-            return catalog.findById(id, product);
-            });
-        dialog.exec();
-    }
-}
+} // namespace shop

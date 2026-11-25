@@ -53,8 +53,7 @@ public:
     // Appends a new product (after full validation, unique ID and barcode).
     bool addProduct(const Product& product, QString* error = nullptr);
 
-    // Replaces the product with the same ID. Its barcode and category can
-    // never change (the barcode is already printed on the goods).
+    // Replaces the product with the same ID. Its barcode index follows a category change.
     bool updateProduct(const Product& product, QString* error = nullptr);
 
     // Sets the available quantity (inventory update by the manager).

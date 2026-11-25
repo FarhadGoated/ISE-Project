@@ -34,6 +34,8 @@ namespace shop {
 
         explicit Order(AvailabilityFn availability = nullptr);
 
+        void setAvailability(AvailabilityFn availability);
+
         AddOutcome add(const Product& product, qint64 quantityMilli,
             QString* error = nullptr,
             AtLimitChoice choice = AtLimitChoice::Ask);

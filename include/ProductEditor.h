@@ -3,7 +3,7 @@
 // - Adding: the manager picks a category (or creates one), fills the fields,
 //   and the barcode (category id + 4-digit number) and its PNG are generated
 //   on Save.
-// - Editing: barcode and category are fixed; everything else can change.
+// - Editing preserves the Product ID across category and barcode changes.
 // Both Product.txt and PCategory.txt are saved before the dialog closes.
 #pragma once
 #include "CategoryCatalog.h"
@@ -47,7 +47,7 @@ private:
     QLineEdit* taxEdit_ = nullptr;
     QLineEdit* discountEdit_ = nullptr;
     QLineEdit* quantityEdit_ = nullptr;
-    QLabel* barcodeLabel_ = nullptr;
+    QLineEdit* barcodeEdit_ = nullptr;
 };
 
 }

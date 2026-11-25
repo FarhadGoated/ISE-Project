@@ -62,6 +62,10 @@ namespace shop {
         : availability_(std::move(availability)) {
     }
 
+    void Order::setAvailability(AvailabilityFn availability) {
+        availability_ = std::move(availability);
+    }
+
     AddOutcome Order::add(const Product& product, qint64 quantityMilli,
         QString* error, AtLimitChoice choice) {
         if (error) {

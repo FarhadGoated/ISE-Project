@@ -6,19 +6,27 @@
 #include "BarcodeTypes.h"
 #include "BillCalculator.h"
 #include "CheckoutStorage.h"
+#include "BillPdf.h"
+#include "BillStorage.h"
+#include "PaymentDialog.h"
+#include "OrderStorage.h"
+#include "OrderDialog.h"
+#include <QLockFile>
+#include "SeasonDiscounts.h"
+#include <QTimer>
+#include <QListWidget>
+#include <QStatusBar>
 #include "ImageProcessor.h"
 #include "InputValidator.h"
 #include "ProductCatalog.h"
 #include "ScanDialog.h"
 #include "ManagerWindow.h"
 
-#include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -27,9 +35,6 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -37,7 +42,6 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
-#include <QSaveFile>
 #include <QString>
 #include <QStringList>
 #include <QTableWidget>
@@ -137,12 +141,19 @@ namespace shop {
                 metrics->addWidget(card, 1);
                 };
             const bool counted = product.unit == Unit::Count;
-            const QString stock = quantityText(product, product.stockMilli);
+            store::CheckoutStorage ledger(dataDir, nullptr);
+            ProductCatalog live;
+            Product latest;
+            const bool readable = ledger.load() && live.load(QDir(dataDir).filePath("Product.txt")) &&
+                live.findById(product.id, latest);
+            const auto available = readable ? qMax<qint64>(0, latest.stockMilli -
+                ledger.reservedStock(product.id, QDateTime::currentDateTime())) : 0;
+            const QString stock = quantityText(product, available);
             addMetric(counted ? QStringLiteral("Price per unit") : QStringLiteral("Price per kg"),
                 money(product.pricePaisa));
-            addMetric(QStringLiteral("Available quantity"), counted
+            addMetric(QStringLiteral("Available quantity"), !readable ? QStringLiteral("Unavailable") : counted
                 ? QStringLiteral("%1 %2").arg(stock,
-                    product.stockMilli == 1000 ? QStringLiteral("unit") : QStringLiteral("units"))
+                    available == 1000 ? QStringLiteral("unit") : QStringLiteral("units"))
                 : stock);
             productDetails->addLayout(metrics);
 
@@ -276,193 +287,154 @@ namespace shop {
             }
         }
 
-        bool collectPayment(QWidget* parent, const Bill& bill, CheckoutDetails& details)
-        {
-            QDialog dialog(parent);
-            dialog.setWindowTitle(QStringLiteral("Checkout"));
-            auto* form = new QFormLayout(&dialog);
-            auto* name = new QLineEdit(&dialog);
-            auto* contact = new QLineEdit(&dialog);
-            auto* mode = new QComboBox(&dialog);
-            mode->addItem(QStringLiteral("Cash"), QStringLiteral("cash"));
-            mode->addItem(QStringLiteral("Card"), QStringLiteral("card"));
-            mode->addItem(QStringLiteral("Wallet"), QStringLiteral("wallet"));
-            auto* merchant = new QLineEdit(&dialog);
-            merchant->setEnabled(false);
-
-            form->addRow(QStringLiteral("Amount due"), new QLabel(money(bill.totals.payablePaisa), &dialog));
-            form->addRow(QStringLiteral("Customer name"), name);
-            form->addRow(QStringLiteral("Contact (optional)"), contact);
-            form->addRow(QStringLiteral("Payment mode"), mode);
-            form->addRow(QStringLiteral("Payment merchant"), merchant);
-
-            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-            buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Save Bill"));
-            form->addRow(buttons);
-            const auto cashSelected = [mode] {
-                return mode->currentData().toString() == QStringLiteral("cash");
-                };
-            QObject::connect(mode, &QComboBox::currentIndexChanged, &dialog, [=](int) {
-                merchant->setEnabled(!cashSelected());
-                });
-            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-            QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-                if (name->text().trimmed().isEmpty()) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Checkout"),
-                        QStringLiteral("Enter the customer name."));
-                    name->setFocus();
-                    return;
-                }
-                if (!cashSelected() && merchant->text().trimmed().isEmpty()) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Checkout"),
-                        QStringLiteral("Enter the payment merchant."));
-                    merchant->setFocus();
-                    return;
-                }
-
-                details.customerName = name->text().trimmed();
-                details.customerContact = contact->text().trimmed();
-                details.paymentMode = mode->currentData().toString();
-                details.merchantName = cashSelected() ? QString{} : merchant->text().trimmed();
-                details.paymentPaisa = bill.totals.payablePaisa;
-                dialog.accept();
-                });
-            return dialog.exec() == QDialog::Accepted;
-        }
-
         void showBill(QWidget* parent, const Bill& bill, const CheckoutDetails& details,
             const CheckoutReceipt& receipt)
         {
             QDialog dialog(parent);
             dialog.setWindowTitle(QStringLiteral("Bill %1").arg(receipt.billId));
-            dialog.resize(920, 450);
+            dialog.setObjectName("receiptDialog");
+            dialog.resize(800, 560);
             auto* layout = new QVBoxLayout(&dialog);
+            layout->setContentsMargins(20, 18, 20, 18);
+            layout->setSpacing(12);
+            auto* receiptTitle = new QLabel("Bill " + receipt.billId, &dialog);
+            receiptTitle->setObjectName("pageTitle");
+            layout->addWidget(receiptTitle);
             auto* summary = new QLabel(&dialog);
+            summary->setProperty("muted", true);
             summary->setTextFormat(Qt::PlainText);
-            summary->setText(QStringLiteral("Order %1\nCustomer %2\nPayment %3 (%4)")
-                .arg(receipt.orderId, details.customerName, details.paymentMode, details.status));
+            summary->setText(QStringLiteral("Super Duper Ultra Mega Store   |   %5\nOrder %1   |   Customer %2\nPayment %3 (%4)")
+                .arg(receipt.orderId, details.customerName, details.paymentMode, details.status,
+                    QDateTime(bill.billDate, bill.billTime).toString("yyyy-MM-dd HH:mm:ss")));
             layout->addWidget(summary);
 
             auto* table = makeTable(&dialog, {
                 QStringLiteral("Product"), QStringLiteral("Qty"), QStringLiteral("Unit price"),
-                QStringLiteral("Unit discount"), QStringLiteral("Subtotal"), QStringLiteral("Tax"),
-                QStringLiteral("Discount"), QStringLiteral("Payable")
+                QStringLiteral("Subtotal"), QStringLiteral("Product discount")
                 });
             for (const BillLine& line : bill.lines) {
                 const auto& product = line.item.product;
                 addTableRow(table, { product.acronym, quantityText(product, line.item.quantityMilli),
-                    money(product.pricePaisa), money(product.discountPaisa),
-                    money(line.amounts.subtotalPaisa), money(line.amounts.taxPaisa),
-                    money(line.amounts.discountPaisa), money(line.amounts.payablePaisa) });
+                    money(product.pricePaisa), money(line.amounts.subtotalPaisa), money(line.amounts.discountPaisa) });
             }
             layout->addWidget(table);
 
             auto* totals = new QFormLayout;
             totals->addRow(QStringLiteral("Subtotal without tax"), new QLabel(money(bill.totals.subtotalPaisa), &dialog));
             totals->addRow(QStringLiteral("Total tax"), new QLabel(money(bill.totals.taxPaisa), &dialog));
-            totals->addRow(QStringLiteral("Total discount"), new QLabel(money(bill.totals.discountPaisa), &dialog));
-            totals->addRow(QStringLiteral("Total payable"), new QLabel(money(bill.totals.payablePaisa), &dialog));
+            totals->addRow(QStringLiteral("Seasonal discount"), new QLabel(money(bill.seasonalDiscountPaisa), &dialog));
+            const QString specialCaption = bill.specialBasisPoints > 0
+                ? QStringLiteral("Special discount (%1%)").arg(
+                    BillCalculator::formatPercentBasisPoints(bill.specialBasisPoints))
+                : QStringLiteral("Special discount");
+            totals->addRow(specialCaption, new QLabel(money(bill.specialDiscountPaisa), &dialog));
+            totals->addRow(QStringLiteral("Amount received"), new QLabel(money(bill.amountReceivedPaisa), &dialog));
+            totals->addRow(QStringLiteral("Balance returned"), new QLabel(money(bill.balanceReturnedPaisa), &dialog));
+            totals->addRow(QStringLiteral("Product discounts"), new QLabel(money(bill.totals.discountPaisa), &dialog));
+            auto* finalPayable = new QLabel(money(bill.totals.payablePaisa), &dialog);
+            finalPayable->setObjectName("payableAmount");
+            totals->addRow(QStringLiteral("Total payable"), finalPayable);
             layout->addLayout(totals);
             auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+            auto* pdf = buttons->addButton(QStringLiteral("Save PDF"), QDialogButtonBox::ActionRole);
+            pdf->setProperty("role", "primary");
+            QObject::connect(pdf, &QPushButton::clicked, &dialog, [&] { offerBillPdf(&dialog, bill); });
             layout->addWidget(buttons);
             QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
             dialog.exec();
         }
 
-        QString heldOrderPath(const QString& dataDir)
+        template<class Operation>
+        bool changeQuantity(QWidget* parent, Unit unit, Operation operation, QString& error)
         {
-            return QDir(dataDir).filePath(QStringLiteral("HeldOrder.json"));
-        }
-
-        bool holdOrder(const QString& path, const Order& order, QString& error)
-        {
-            if (QFileInfo::exists(path)) {
-                error = QStringLiteral("Resume the existing held order before holding another.");
-                return false;
+            auto outcome = operation(AtLimitChoice::Ask);
+            if (outcome == AddOutcome::NeedsDecision) {
+                QMessageBox prompt(parent);
+                prompt.setWindowTitle("Last stock");
+                prompt.setText("This quantity uses all available stock.");
+                auto* sell = prompt.addButton("Sell all", QMessageBox::AcceptRole);
+                auto* keep = prompt.addButton(unit == Unit::Count ? "Keep one piece" : "Keep one gram",
+                    QMessageBox::ActionRole);
+                prompt.addButton(QMessageBox::Cancel);
+                prompt.exec();
+                if (prompt.clickedButton() != sell && prompt.clickedButton() != keep) return false;
+                outcome = operation(prompt.clickedButton() == sell ? AtLimitChoice::SellAll : AtLimitChoice::KeepOne);
             }
-
-            QJsonArray items;
-            for (const OrderItem& item : order.items()) {
-                items.append(QJsonObject{
-                    { QStringLiteral("id"), item.product.id },
-                    { QStringLiteral("barcode"), item.product.barcode },
-                    { QStringLiteral("quantityMilli"), QString::number(item.quantityMilli) }
-                    });
-            }
-            const QJsonDocument document(QJsonObject{
-                { QStringLiteral("status"), QStringLiteral("on-hold") },
-                { QStringLiteral("items"), items }
-                });
-            const QByteArray bytes = document.toJson();
-            QSaveFile file(path);
-            if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
-                error = file.errorString();
-                return false;
-            }
-            return true;
-        }
-
-        bool resumeOrder(const QString& dataDir, Order& order, QString& error)
-        {
-            QFile file(heldOrderPath(dataDir));
-            if (!file.open(QIODevice::ReadOnly)) {
-                error = file.errorString();
-                return false;
-            }
-            const QJsonObject draft = QJsonDocument::fromJson(file.readAll()).object();
-            file.close();
-            const QJsonArray items = draft.value(QStringLiteral("items")).toArray();
-            if (draft.value(QStringLiteral("status")).toString() != QStringLiteral("on-hold")
-                || items.isEmpty()) {
-                error = QStringLiteral("The held order file is invalid.");
-                return false;
-            }
-
-            ProductCatalog catalog;
-            if (!catalog.load(QDir(dataDir).filePath(QStringLiteral("Product.txt")), &error)) {
-                return false;
-            }
-            Order restored;
-            for (const QJsonValue& value : items) {
-                const QJsonObject item = value.toObject();
-                const QString barcode = item.value(QStringLiteral("barcode")).toString();
-                bool quantityOk = false;
-                const qint64 quantity = item.value(QStringLiteral("quantityMilli"))
-                    .toString().toLongLong(&quantityOk);
-                Product product;
-                if (!quantityOk || !catalog.findByBarcode(barcode, product)
-                    || product.id != item.value(QStringLiteral("id")).toString()) {
-                    error = QStringLiteral("Could not restore held product %1.").arg(barcode);
-                    return false;
-                }
-                if (!restored.add(product, quantity, &error)) {
-                    return false;
-                }
-            }
-
-            if (!file.remove()) {
-                error = file.errorString();
-                return false;
-            }
-            order = restored;
-            return true;
+            if (outcome != AddOutcome::Added) QMessageBox::warning(parent, "Quantity", error);
+            return outcome == AddOutcome::Added;
         }
 
         void recordOrder(QWidget* parent, const QString& dataDir, QPushButton* startOrderButton,
-            bool resumeHeld = false)
+            const store::OrderRecord& prior = {})
         {
+            QString problem;
+            const bool existing = !prior.orderId.isEmpty();
+            const bool revision = existing && prior.status == store::Status::Paid;
+            store::CheckoutStorage ledger(dataDir, nullptr);
+            ProductCatalog catalog;
+            if (!ledger.load() || !catalog.load(QDir(dataDir).filePath("Product.txt"), &problem)) {
+                QMessageBox::warning(parent, "Open cart", problem.isEmpty() ? ledger.loadErrors().join('\n') : problem);
+                return;
+            }
             Order order;
-            if (resumeHeld) {
-                QString error;
-                if (!resumeOrder(dataDir, order, error)) {
-                    QMessageBox::warning(parent, QStringLiteral("Resume Held Order"), error);
-                    return;
+            if (existing) {
+                if (revision) {
+                    const auto eligible = ledger.checkPaidEditWindow(prior.orderId, QDateTime::currentDateTime());
+                    if (!eligible.ok) { QMessageBox::warning(parent, "Edit order", eligible.error); return; }
+                    if (!requestPaidEdit(parent, dataDir, prior.orderId, prior.activeBillId)) return;
+                }
+                if (!loadOrder(dataDir, prior.orderId, order, problem)) {
+                    QMessageBox::warning(parent, "Open order", problem); return;
+                }
+                if (!revision) {
+                    std::vector<PriceChange> changes;
+                    if ((prior.status == store::Status::OnHold && !order.resume(QDateTime::currentDateTime(), &problem)) ||
+                        !order.reprice([&](const QString& id, Product& p) { return catalog.findById(id, p); },
+                            changes, &problem)) {
+                        QMessageBox::warning(parent, "Resume order", problem); return;
+                    }
+                    QStringList summary;
+                    for (const auto& change : changes)
+                        summary << QStringLiteral("%1: price %2 to %3, discount %4 to %5")
+                        .arg(change.productId, money(change.oldPricePaisa), money(change.newPricePaisa),
+                            money(change.oldDiscountPaisa), money(change.newDiscountPaisa));
+                    if (!summary.isEmpty()) QMessageBox::information(parent, "Updated prices", summary.join('\n'));
                 }
             }
+            QHash<QString, qint64> available;
+            order.setAvailability([&available](const Product& p) { return available.value(p.id); });
+            const auto reloadAvailability = [&](QWidget* window) {
+                QLockFile lock(QDir(dataDir).filePath(".checkout.lock"));
+                QString error;
+                if (!lock.tryLock(0)) { QMessageBox::information(window, "Stock", "Inventory is busy. Try again."); return false; }
+                if (!ledger.load() || !catalog.load(QDir(dataDir).filePath("Product.txt"), &error)) {
+                    QMessageBox::warning(window, "Stock", error.isEmpty() ? ledger.loadErrors().join('\n') : error); return false;
+                }
+                const auto reserved = ledger.reservedByProduct(QDateTime::currentDateTime(), prior.orderId);
+                available.clear();
+                for (const auto& p : catalog.products()) available[p.id] = qMax<qint64>(0, p.stockMilli - reserved.value(p.id));
+                if (revision) {
+                    for (const auto& line : prior.lines) {
+                        auto& amount = available[line.productId];
+                        amount += qMin(line.qtyMilli, std::numeric_limits<qint64>::max() - amount);
+                    }
+                }
+                return true;
+                };
+            QVector<SeasonDiscount> seasons;
+            if (!loadSeasons(dataDir, seasons, problem)) {
+                QMessageBox::warning(parent, "Seasonal discounts", problem); return;
+            }
+            DiscountRates rates;
+            if (!revision)
+                rates.specialBasisPoints = prior.approvedSpecialBasisPoints;
+            rates.seasonalBasisPoints = highestSeasonRate(seasons, QDate::currentDate());
             QDialog dialog(parent);
-            const QString title = resumeHeld ? QStringLiteral("Resume Held Order") : QStringLiteral("New Order");
+            const QString title = revision ? "Revise paid order " + prior.orderId :
+                existing ? "Continue order " + prior.orderId : QStringLiteral("New Order");
             dialog.setWindowTitle(title);
-            dialog.resize(960, 560);
+            dialog.setObjectName("orderWorkspace");
+            dialog.resize(1120, 650);
             auto* layout = new QVBoxLayout(&dialog);
             layout->setContentsMargins(24, 20, 24, 20);
             layout->setSpacing(14);
@@ -470,6 +442,19 @@ namespace shop {
             heading->setObjectName(QStringLiteral("pageTitle"));
             layout->addWidget(heading);
 
+            auto* identity = new QHBoxLayout;
+            auto* customer = new QLineEdit(prior.customerName, &dialog);
+            customer->setPlaceholderText("Customer name");
+            auto* contact = new QLineEdit(prior.contact, &dialog);
+            contact->setPlaceholderText("Contact (optional)");
+            const auto specialLabel = [](int rate) {
+                return QStringLiteral("Special discount (%1%)").arg(
+                    BillCalculator::formatPercentBasisPoints(rate));
+                };
+            auto* special = new QPushButton(specialLabel(rates.specialBasisPoints), &dialog);
+            special->setAutoDefault(false);
+            identity->addWidget(customer); identity->addWidget(contact); identity->addWidget(special);
+            layout->addLayout(identity);
             auto* scanPanel = new QFrame(&dialog);
             scanPanel->setProperty("panel", true);
             auto* controls = new QHBoxLayout(scanPanel);
@@ -496,7 +481,6 @@ namespace shop {
 
             auto* cartHeading = new QLabel(&dialog);
             cartHeading->setProperty("heading", true);
-            layout->addWidget(cartHeading);
             auto* table = makeTable(&dialog, { QStringLiteral("Product"), QStringLiteral("Unit price"),
                 QStringLiteral("Quantity"), QStringLiteral("Line total"), QStringLiteral(""),
                 QStringLiteral("") });
@@ -510,26 +494,38 @@ namespace shop {
             table->setColumnWidth(4, 112);
             table->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
             table->setColumnWidth(5, 87);
-            layout->addWidget(table, 1);
+            table->setSelectionMode(QAbstractItemView::NoSelection);
+            table->setShowGrid(false);
+            auto* cartWorkspace = new QHBoxLayout;
+            cartWorkspace->setSpacing(16);
+            auto* cart = new QVBoxLayout;
+            cart->addWidget(cartHeading);
+            cart->addWidget(table, 1);
+            cartWorkspace->addLayout(cart, 1);
 
             auto* checkoutPanel = new QFrame(&dialog);
             checkoutPanel->setProperty("panel", true);
-            auto* checkout = new QHBoxLayout(checkoutPanel);
+            checkoutPanel->setObjectName("orderSummary");
+            checkoutPanel->setMinimumWidth(270);
+            auto* checkout = new QVBoxLayout(checkoutPanel);
+            checkout->setSpacing(10);
+            auto* summaryTitle = new QLabel("Order Summary", checkoutPanel);
+            summaryTitle->setProperty("heading", true);
+            checkout->addWidget(summaryTitle);
             checkout->setContentsMargins(14, 12, 14, 12);
             auto* close = new QPushButton(QStringLiteral("Close"), checkoutPanel);
             auto* hold = new QPushButton(QStringLiteral("Hold Order"), checkoutPanel);
+            auto* draft = new QPushButton(QStringLiteral("Save draft"), checkoutPanel);
             auto* generate = new QPushButton(QStringLiteral("Generate Bill"), checkoutPanel);
             generate->setProperty("role", "primary");
-            for (auto* button : { close, hold, generate }) {
-                button->setAutoDefault(false);
-                checkout->addWidget(button);
-            }
-            checkout->addStretch();
+            for (auto* button : { close, draft, hold, generate }) button->setAutoDefault(false);
             auto* totals = new QGridLayout;
             totals->setHorizontalSpacing(16);
             auto* subtotal = new QLabel(checkoutPanel);
             auto* tax = new QLabel(checkoutPanel);
-            auto* discount = new QLabel(checkoutPanel);
+            auto* productDiscount = new QLabel(checkoutPanel);
+            auto* seasonalDiscount = new QLabel(checkoutPanel);
+            auto* specialDiscount = new QLabel(checkoutPanel);
             auto* payable = new QLabel(checkoutPanel);
             payable->setObjectName(QStringLiteral("payableAmount"));
             const auto addTotal = [&](int row, const QString& label, QLabel* amount) {
@@ -540,16 +536,31 @@ namespace shop {
                 totals->addWidget(amount, row, 1);
                 };
             addTotal(0, QStringLiteral("Subtotal"), subtotal);
-            addTotal(1, QStringLiteral("Tax"), tax);
-            addTotal(2, QStringLiteral("Discount"), discount);
-            addTotal(3, QStringLiteral("Estimated payable"), payable);
+            addTotal(1, QStringLiteral("Product discounts"), productDiscount);
+            addTotal(2, QStringLiteral("Seasonal discount"), seasonalDiscount);
+            addTotal(3, QStringLiteral("Special discount"), specialDiscount);
+            addTotal(4, QStringLiteral("Tax"), tax);
             checkout->addLayout(totals);
-            layout->addWidget(checkoutPanel);
+            auto* payablePanel = new QFrame(checkoutPanel);
+            payablePanel->setObjectName("payablePanel");
+            auto* payableLayout = new QVBoxLayout(payablePanel);
+            auto* payableLabel = new QLabel("Estimated payable", payablePanel);
+            payableLabel->setProperty("muted", true);
+            payableLayout->addWidget(payableLabel);
+            payableLayout->addWidget(payable);
+            checkout->addWidget(payablePanel);
+            checkout->addWidget(generate);
+            checkout->addWidget(hold);
+            checkout->addWidget(draft);
+            checkout->addStretch();
+            checkout->addWidget(close);
+            cartWorkspace->addWidget(checkoutPanel);
+            layout->addLayout(cartWorkspace, 1);
 
             const auto refreshTotals = [&] {
                 Bill estimate;
                 const bool hasEstimate = !order.items().isEmpty()
-                    && BillCalculator::calculate(order, estimate);
+                    && BillCalculator::calculate(order, rates, estimate);
                 const auto displayAmount = [&](qint64 amount) {
                     return hasEstimate || order.items().isEmpty() ? money(amount) : QStringLiteral("\u2014");
                     };
@@ -559,7 +570,9 @@ namespace shop {
                 }
                 subtotal->setText(displayAmount(estimate.totals.subtotalPaisa));
                 tax->setText(displayAmount(estimate.totals.taxPaisa));
-                discount->setText(displayAmount(estimate.totals.discountPaisa));
+                productDiscount->setText(displayAmount(estimate.totals.discountPaisa));
+                seasonalDiscount->setText(displayAmount(estimate.seasonalDiscountPaisa));
+                specialDiscount->setText(displayAmount(estimate.specialDiscountPaisa));
                 payable->setText(displayAmount(estimate.totals.payablePaisa));
                 };
 
@@ -605,10 +618,10 @@ namespace shop {
                     const auto setQuantity = [&, row, updateQuantityButtons](qint64 amount) {
                         const auto& line = order.items().at(row);
                         QString error;
-                        if (!order.setQuantity(line.product.id, amount, &error)) {
-                            QMessageBox::warning(&dialog, QStringLiteral("Edit Quantity"), error);
-                            return;
-                        }
+                        if (!reloadAvailability(&dialog)) return;
+                        if (!changeQuantity(&dialog, line.product.unit, [&](AtLimitChoice choice) {
+                            return order.setQuantity(line.product.id, amount, &error, choice);
+                            }, error)) return;
                         updateQuantityButtons(order.items().at(row));
                         refreshTotals();
                         };
@@ -645,14 +658,29 @@ namespace shop {
                 }
                 cartHeading->setText(QStringLiteral("Cart (%1)").arg(table->rowCount()));
                 refreshTotals();
-                generate->setEnabled(startOrderButton->isEnabled() && !order.items().isEmpty());
-                hold->setEnabled(!order.items().isEmpty());
+                generate->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
+                draft->setVisible(!revision && prior.status != store::Status::OnHold);
+                draft->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
+                hold->setVisible(!revision);
+                hold->setEnabled((!startOrderButton || startOrderButton->isEnabled()) && !order.items().isEmpty());
                 };
             QObject::connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
-            const auto addProduct = [&](QWidget* promptParent, const QString& digits) {
+            const auto addProduct = [&](QWidget* promptParent, const QString& digits, QString* name = nullptr) {
                 Product product;
                 if (!lookupProduct(promptParent, dataDir, product, digits)) {
                     return false;
+                }
+                if (revision) {
+                    for (const auto& line : prior.lines) {
+                        if (line.productId == product.id) {
+                            product.pricePaisa = line.unitPricePaisa;
+                            product.discountPaisa = line.discountPerUnitPaisa;
+                            product.taxPaisa = line.taxPerUnitPaisa;
+                            product.acronym = line.acronym;
+                            product.barcode = line.barcode;
+                            break;
+                        }
+                    }
                 }
                 const qint64 quantity = product.unit == Unit::Count
                     ? 1000 : requestQuantity(promptParent, product, 1000);
@@ -661,16 +689,18 @@ namespace shop {
                 }
 
                 QString error;
-                if (!order.add(product, quantity, &error)) {
-                    QMessageBox::warning(promptParent, QStringLiteral("Add Product"), error);
-                    return false;
-                }
+                if (!reloadAvailability(promptParent)) return false;
+                if (!changeQuantity(promptParent, product.unit, [&](AtLimitChoice choice) {
+                    return order.add(product, quantity, &error, choice);
+                    }, error)) return false;
+                if (name) *name = product.name;
                 refresh();
                 return true;
                 };
             QObject::connect(scan, &QPushButton::clicked, &dialog, [&] {
-                scanOrderBarcodes(&dialog, [&](QWidget* scanner, const QString& digits) {
-                    return addProduct(scanner, digits);
+                scanOrderProducts(&dialog, [&](QWidget* scanner, const QString& digits) {
+                    QString name;
+                    return addProduct(scanner, digits, &name) ? name : QString();
                     });
                 barcode->setFocus();
                 });
@@ -685,40 +715,84 @@ namespace shop {
                 };
             QObject::connect(enter, &QPushButton::clicked, &dialog, addManualBarcode);
             QObject::connect(barcode, &QLineEdit::returnPressed, &dialog, addManualBarcode);
-            QObject::connect(hold, &QPushButton::clicked, &dialog, [&] {
+            const auto saveCart = [&](bool reserve) {
                 QString error;
-                if (!holdOrder(heldOrderPath(dataDir), order, error)) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Hold Order"), error);
-                    return;
+                if (!CheckoutStorage::saveCart(dataDir, order, customer->text().trimmed(),
+                    contact->text().trimmed(), prior, reserve,
+                    rates.specialBasisPoints, error)) {
+                    QMessageBox::warning(&dialog, reserve ? "Hold order" : "Save draft", error); return;
                 }
                 dialog.accept();
+                };
+            QObject::connect(hold, &QPushButton::clicked, &dialog, [&] { saveCart(true); });
+            QObject::connect(draft, &QPushButton::clicked, &dialog, [&] { saveCart(false); });
+            QObject::connect(special, &QPushButton::clicked, &dialog, [&] {
+                if (!authorizeManager(&dialog, "Approve special discount")) return;
+                bool ok = false;
+                const double requested = QInputDialog::getDouble(&dialog, "Special discount", "Percent (0 to 8)",
+                    rates.specialBasisPoints / 100.0, -9999, 9999, 2, &ok);
+                if (!ok) return;
+                rates.specialBasisPoints = BillCalculator::clampSpecialBasisPoints(qRound(requested * 100));
+                special->setText(specialLabel(rates.specialBasisPoints));
+                refreshTotals();
                 });
             QObject::connect(generate, &QPushButton::clicked, &dialog, [&] {
+                if (customer->text().trimmed().isEmpty()) {
+                    customer->setFocus();
+                    QMessageBox::information(&dialog, "Checkout", "Enter the customer name."); return;
+                }
                 Bill bill;
                 QString error;
-                if (!BillCalculator::calculate(order, bill, &error)) {
-                    QMessageBox::warning(&dialog, QStringLiteral("Generate Bill"), error);
-                    return;
+                const QDate billDate = QDate::currentDate();
+                if (!loadSeasons(dataDir, seasons, error)) {
+                    QMessageBox::warning(&dialog, "Seasonal discounts", error); return;
+                }
+                rates.seasonalBasisPoints = highestSeasonRate(seasons, billDate);
+                refreshTotals();
+                if (!BillCalculator::calculate(order, rates, bill, &error)) {
+                    QMessageBox::warning(&dialog, "Generate Bill", error); return;
+                }
+                PaymentInput payment;
+                if (!shop::collectPayment(&dialog, bill.totals.payablePaisa,
+                    revision ? prior.paymentPaisa : -1, payment)) return;
+                const auto now = QDateTime::currentDateTime();
+                if (billDate != now.date()) {
+                    QMessageBox::information(&dialog, "Checkout", "The date changed. Review today's discounts."); return;
                 }
                 CheckoutDetails details;
-                if (!collectPayment(&dialog, bill, details)) {
-                    return;
-                }
-
+                details.orderId = prior.orderId;
+                details.expectedBillId = revision ? prior.activeBillId : QString();
+                details.previous = prior;
+                details.customerName = customer->text().trimmed();
+                details.customerContact = contact->text().trimmed();
+                details.paymentMode = payment.mode.toLower();
+                details.merchantName = payment.provider;
+                details.paymentPaisa = payment.receivedPaisa;
                 generate->setEnabled(false);
                 CheckoutReceipt receipt;
-                if (!CheckoutStorage::save(dataDir, bill, details, QDateTime::currentDateTime(),
+                if (!CheckoutStorage::save(dataDir, bill, details, now,
                     receipt, &error)) {
                     if (receipt.recoveryRequired) {
-                        startOrderButton->setEnabled(false);
+                        if (startOrderButton) startOrderButton->setEnabled(false);
+                        dialog.reject();
                         error += QStringLiteral("\nCheckout is locked for this session. Check the saved files before restarting.");
                     }
                     QMessageBox::warning(&dialog, QStringLiteral("Save Bill"), error);
                     generate->setEnabled(!receipt.recoveryRequired);
                     return;
                 }
-                order = Order{};
-                refresh();
+                if (revision) finishPaidEdit(dataDir, prior.orderId);
+                bill.orderId = receipt.orderId;
+                bill.billId = receipt.billId;
+                bill.customerName = details.customerName;
+                bill.billDate = now.date();
+                bill.billTime = now.time();
+                bill.paymentStatus = details.status;
+                bill.paymentMode = details.paymentMode;
+                bill.paymentProvider = payment.provider;
+                bill.amountReceivedPaisa = payment.receivedPaisa;
+                bill.balanceReturnedPaisa = payment.changePaisa;
+                dialog.accept();
                 showBill(&dialog, bill, details, receipt);
                 });
 
@@ -729,11 +803,73 @@ namespace shop {
 
     } // namespace
 
+    void openProductLookup(QWidget* parent, const QString& dataDir)
+    {
+        QDialog dialog(parent);
+        dialog.setWindowTitle("Product Lookup");
+        dialog.resize(490, 270);
+        auto* layout = new QVBoxLayout(&dialog);
+        layout->setContentsMargins(20, 18, 20, 16);
+        layout->setSpacing(12);
+
+        auto* heading = new QLabel("Product Lookup", &dialog);
+        heading->setObjectName("pageTitle");
+        layout->addWidget(heading);
+
+        auto* scan = new QPushButton("Scan with camera", &dialog);
+        scan->setProperty("role", "primary");
+        scan->setAutoDefault(false);
+        scan->setMinimumHeight(44);
+        layout->addWidget(scan);
+
+        auto* manual = new QFrame(&dialog);
+        manual->setProperty("panel", true);
+        auto* manualLayout = new QVBoxLayout(manual);
+        manualLayout->setContentsMargins(12, 10, 12, 12);
+        auto* digits = new QLineEdit(manual);
+        digits->setPlaceholderText("e.g. 123456");
+        digits->setMaxLength(6);
+        digits->setInputMethodHints(Qt::ImhDigitsOnly);
+        digits->setValidator(new QRegularExpressionValidator(QRegularExpression("[1-9][0-9]{5}"), digits));
+        auto* label = new QLabel("&Enter six-digit barcode", manual);
+        label->setBuddy(digits);
+        manualLayout->addWidget(label);
+        auto* inputRow = new QHBoxLayout;
+        auto* find = new QPushButton("Find Product", manual);
+        find->setEnabled(false);
+        inputRow->addWidget(digits, 1);
+        inputRow->addWidget(find);
+        manualLayout->addLayout(inputRow);
+        layout->addWidget(manual);
+        layout->addStretch();
+
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        layout->addWidget(buttons);
+        QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        const auto lookup = [&](const QString& code) {
+            if (code.isEmpty()) return;
+            Product p;
+            if (lookupProduct(&dialog, dataDir, p, code)) showProduct(&dialog, p, dataDir);
+            };
+        QObject::connect(scan, &QPushButton::clicked, &dialog, [&] { lookup(scanProductBarcode(&dialog)); });
+        QObject::connect(digits, &QLineEdit::textChanged, &dialog, [&] { find->setEnabled(digits->hasAcceptableInput()); });
+        QObject::connect(find, &QPushButton::clicked, &dialog, [&] { lookup(digits->text()); });
+        find->setAutoDefault(false);
+        QObject::connect(digits, &QLineEdit::returnPressed, find, &QPushButton::click);
+        digits->setFocus();
+        dialog.exec();
+    }
+
+    void openOrderDialog(QWidget* parent, const QString& dataDir)
+    {
+        recordOrder(parent, dataDir, nullptr);
+    }
+
     MainWindow::MainWindow(QWidget* parent)
         : QMainWindow(parent)
     {
         setWindowTitle(QStringLiteral("Super Duper Ultra Mega Store"));
-        resize(1000, 375);
+        resize(1020, 520);
 
         auto* content = new QWidget(this);
         content->setObjectName(QStringLiteral("posHome"));
@@ -746,11 +882,14 @@ namespace shop {
         auto* title = new QLabel(QStringLiteral("Super Duper Ultra Mega Store"), content);
         title->setObjectName(QStringLiteral("pageTitle"));
         auto* role = new QLabel(QStringLiteral("Cashier"), content);
-        role->setProperty("muted", true);
+        role->setObjectName("cashierRole");
         header->addWidget(title, 1);
         header->addWidget(role);
         layout->addLayout(header);
 
+        auto* cashierTitle = new QLabel("Cashier workspace", content);
+        cashierTitle->setProperty("heading", true);
+        layout->addWidget(cashierTitle);
         auto* workArea = new QHBoxLayout;
         workArea->setSpacing(14);
         auto* cashier = new QGridLayout;
@@ -758,7 +897,7 @@ namespace shop {
         const auto action = [content, cashier](const QString& label, int row, int column) {
             auto* button = new QPushButton(label, content);
             button->setProperty("role", "tile");
-            button->setMinimumHeight(72);
+            button->setMinimumHeight(68);
             button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
             cashier->addWidget(button, row, column);
             return button;
@@ -767,8 +906,7 @@ namespace shop {
         orderButton->setObjectName(QStringLiteral("newOrder"));
         auto* resumeButton = action(QStringLiteral("Resume Held Order"), 0, 1);
         auto* findOrder = action(QStringLiteral("Find Order"), 1, 0);
-        findOrder->setEnabled(false);
-        findOrder->setToolTip(QStringLiteral("Order history is not available yet."));
+        auto* printBill = new QPushButton(QStringLiteral("Reprint Bill"), content);
         auto* lookupButton = action(QStringLiteral("Product Lookup"), 1, 1);
         lookupButton->setObjectName(QStringLiteral("productLookup"));
         cashier->setColumnStretch(0, 1);
@@ -777,6 +915,7 @@ namespace shop {
 
         auto* managerPanel = new QFrame(content);
         managerPanel->setProperty("panel", true);
+        managerPanel->setObjectName("managerAccessCard");
         auto* managerLayout = new QVBoxLayout(managerPanel);
         managerLayout->setContentsMargins(16, 14, 16, 14);
         auto* managerTitle = new QLabel(QStringLiteral("Manager Access"), managerPanel);
@@ -786,6 +925,10 @@ namespace shop {
         auto* managerButton = new QPushButton(QStringLiteral("Open Manager Panel"), managerPanel);
         managerLayout->addWidget(managerTitle);
         managerLayout->addWidget(managerDetails);
+        auto* managerActions = new QLabel("Inventory, products, discounts and reports", managerPanel);
+        managerActions->setWordWrap(true);
+        managerActions->setProperty("muted", true);
+        managerLayout->addWidget(managerActions);
         managerLayout->addStretch();
         managerLayout->addWidget(managerButton);
         workArea->addWidget(managerPanel, 1);
@@ -801,6 +944,7 @@ namespace shop {
         auto* toolsToggle = new QPushButton(QStringLiteral("Show Tools"), utilityPanel);
         toolsToggle->setCheckable(true);
         utilityHeader->addWidget(toolsTitle, 1);
+        utilityHeader->addWidget(printBill);
         utilityHeader->addWidget(toolsToggle);
         utilityLayout->addLayout(utilityHeader);
         layout->addWidget(utilityPanel);
@@ -952,10 +1096,7 @@ namespace shop {
             });
         connect(lookupButton, &QPushButton::clicked, this, [this, dataDirectory] {
             const QString dataDir = dataDirectory();
-            Product product;
-            if (!dataDir.isEmpty() && lookupProduct(this, dataDir, product)) {
-                showProduct(this, product, dataDir);
-            }
+            if (!dataDir.isEmpty()) openProductLookup(this, dataDir);
             });
         connect(orderButton, &QPushButton::clicked, this, [this, orderButton, dataDirectory] {
             const QString dataDir = dataDirectory();
@@ -963,23 +1104,158 @@ namespace shop {
                 recordOrder(this, dataDir, orderButton);
             }
             });
-        connect(resumeButton, &QPushButton::clicked, this, [this, orderButton, dataDirectory] {
-            const QString dataDir = dataDirectory();
-            if (dataDir.isEmpty()) {
-                return;
+        const auto browse = [this, orderButton, dataDirectory](bool holdsOnly) {
+            const QString dir = dataDirectory();
+            if (dir.isEmpty()) return;
+            QString error;
+            store::CheckoutStorage ledger(dir, nullptr);
+            if (!refreshOrderStates(dir, QDateTime::currentDateTime(), error) || !ledger.load()) {
+                QMessageBox::warning(this, "Orders", error.isEmpty() ? ledger.loadErrors().join('\n') : error); return;
             }
-            if (!orderButton->isEnabled()) {
-                QMessageBox::warning(this, QStringLiteral("Resume Held Order"),
-                    QStringLiteral("Check the saved checkout files before restarting the app."));
-                return;
+            QList<store::OrderRecord> records;
+            for (const auto& id : ledger.orderIds()) {
+                store::OrderRecord row;
+                if (!ledger.order(id, &row)) continue;
+                const bool held = row.status == store::Status::OnHold;
+                if (holdsOnly && !held) continue;
+                records.append(row);
             }
-            if (!QFileInfo::exists(heldOrderPath(dataDir))) {
-                QMessageBox::information(this, QStringLiteral("Resume Held Order"),
-                    QStringLiteral("There is no held order to resume."));
-                return;
+            if (records.isEmpty()) { QMessageBox::information(this, "Orders", holdsOnly ? "No held orders." : "No saved orders."); return; }
+            QDialog picker(this);
+            const QString title = holdsOnly ? "Resume Held Order" : "Find Order";
+            picker.setWindowTitle(title);
+            picker.resize(710, 420);
+            auto* box = new QVBoxLayout(&picker);
+            box->setContentsMargins(18, 16, 18, 16);
+            box->setSpacing(10);
+            auto* heading = new QLabel(title, &picker);
+            heading->setObjectName("pageTitle");
+            box->addWidget(heading);
+
+            auto* filter = new QLineEdit(&picker);
+            filter->setPlaceholderText("Search by order ID or customer");
+            filter->setAccessibleName("Search orders by ID or customer");
+            filter->setClearButtonEnabled(true);
+            box->addWidget(filter);
+
+            auto* table = makeTable(&picker, { "Order ID", "Customer", "Status",
+                holdsOnly ? QStringLiteral("Hold expires") : QStringLiteral("Order date") });
+            table->horizontalHeader()->setStretchLastSection(false);
+            table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+            table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+            table->verticalHeader()->setDefaultSectionSize(38);
+            table->setSelectionMode(QAbstractItemView::SingleSelection);
+            table->setAlternatingRowColors(true);
+            table->setShowGrid(false);
+            for (const auto& row : records) {
+                addTableRow(table, { row.orderId, row.customerName.isEmpty() ? QStringLiteral("\u2014") : row.customerName,
+                    row.status, holdsOnly ? row.holdExpiry.toString("dd MMM, HH:mm:ss")
+                                          : row.orderDate.toString(Qt::ISODate) });
             }
-            recordOrder(this, dataDir, orderButton, true);
+            box->addWidget(table, 1);
+            auto* empty = new QLabel("No orders match your search.", &picker);
+            empty->setProperty("muted", true);
+            empty->hide();
+            box->addWidget(empty);
+
+            auto* actions = new QHBoxLayout;
+            auto* cancel = new QPushButton(holdsOnly ? "Cancel Hold" : "Cancel Order", &picker);
+            auto* viewBill = new QPushButton("View Bill", &picker);
+            auto* close = new QPushButton("Close", &picker);
+            auto* open = new QPushButton(holdsOnly ? "Resume Order" : "Open Order", &picker);
+            open->setProperty("role", "primary");
+            for (auto* button : { cancel, viewBill, close, open }) button->setAutoDefault(false);
+            actions->addWidget(cancel);
+            if (!holdsOnly) actions->addWidget(viewBill);
+            else viewBill->hide();
+            actions->addStretch();
+            actions->addWidget(close);
+            actions->addWidget(open);
+            box->addLayout(actions);
+
+            const auto selected = [&]() -> const store::OrderRecord* {
+                const int index = table->currentRow();
+                return index >= 0 && !table->isRowHidden(index) ? &records.at(index) : nullptr;
+                };
+            const auto select = [&] {
+                const auto* row = selected();
+                viewBill->setEnabled(row && !row->activeBillId.isEmpty());
+                cancel->setEnabled(row && (row->status == store::Status::OnHold || row->status == store::Status::InProgress));
+                open->setEnabled(row != nullptr);
+                };
+            connect(table, &QTableWidget::currentCellChanged, &picker, select);
+            connect(filter, &QLineEdit::textChanged, &picker, [&](const QString& query) {
+                int first = -1;
+                const auto text = query.trimmed();
+                for (int index = 0; index < table->rowCount(); ++index) {
+                    const auto& row = records.at(index);
+                    const bool visible = row.orderId.contains(text, Qt::CaseInsensitive) ||
+                        row.customerName.contains(text, Qt::CaseInsensitive);
+                    table->setRowHidden(index, !visible);
+                    if (visible && first < 0) first = index;
+                }
+                if (!selected()) table->setCurrentCell(first, first < 0 ? -1 : 0);
+                empty->setVisible(first < 0);
+                select();
+                });
+            connect(viewBill, &QPushButton::clicked, &picker, [&] {
+                const auto* row = selected();
+                if (!row || row->activeBillId.isEmpty()) return;
+                Bill bill;
+                if (!loadActiveBill(dir, row->orderId, bill, error)) {
+                    QMessageBox::warning(&picker, "Bill", error); return;
+                }
+                CheckoutDetails details;
+                details.customerName = row->customerName;
+                details.paymentMode = row->paymentMode;
+                details.status = row->status;
+                showBill(&picker, bill, details, { row->orderId, row->activeBillId, false });
+                });
+            const auto openSelected = [&] { if (selected()) picker.accept(); };
+            connect(open, &QPushButton::clicked, &picker, openSelected);
+            connect(table, &QTableWidget::cellDoubleClicked, &picker, openSelected);
+            connect(filter, &QLineEdit::returnPressed, &picker, openSelected);
+            connect(close, &QPushButton::clicked, &picker, &QDialog::reject);
+            connect(cancel, &QPushButton::clicked, &picker, [&] {
+                const auto* row = selected();
+                if (!row) return;
+                if (QMessageBox::question(&picker, "Cancel order", "Cancel order " + row->orderId + "?") != QMessageBox::Yes) return;
+                if (!CheckoutStorage::cancelCart(dir, *row, error))
+                    QMessageBox::warning(&picker, "Cancel order", error);
+                else picker.reject();
+                });
+            table->selectRow(0);
+            select();
+            filter->setFocus();
+            if (picker.exec() != QDialog::Accepted || !selected()) return;
+            const auto row = *selected();
+            if (row.status == store::Status::Archived) {
+                Bill bill;
+                if (!loadActiveBill(dir, row.orderId, bill, error)) { QMessageBox::warning(this, "Bill", error); return; }
+                CheckoutDetails details;
+                details.customerName = row.customerName; details.status = row.status; details.paymentMode = row.paymentMode;
+                showBill(this, bill, details, { row.orderId,row.activeBillId,false }); return;
+            }
+            if (row.status != store::Status::Paid && row.status != store::Status::OnHold && row.status != store::Status::InProgress) {
+                QMessageBox::information(this, "Order", QStringLiteral("Order %1 is %2.").arg(row.orderId, row.status)); return;
+            }
+            if (orderButton->isEnabled()) recordOrder(this, dir, orderButton, row);
+            };
+        connect(findOrder, &QPushButton::clicked, this, [browse] { browse(false); });
+        connect(resumeButton, &QPushButton::clicked, this, [browse] { browse(true); });
+        connect(printBill, &QPushButton::clicked, this, [this, dataDirectory] {
+            const auto dir = dataDirectory(); if (!dir.isEmpty()) reprintBill(this, dir);
             });
+        const auto sweep = [this] {
+            const auto dir = findDataDirectory();
+            QString error;
+            if (!dir.isEmpty() && !refreshOrderStates(dir, QDateTime::currentDateTime(), error))
+                statusBar()->showMessage(error, 5000);
+            };
+        auto* timer = new QTimer(this);
+        connect(timer, &QTimer::timeout, this, sweep);
+        timer->start(15000);
+        sweep();
         connect(scanButton, &QPushButton::clicked, this, [this, decodedOutput] {
             const QString digits = scanProductBarcode(this);
             if (!digits.isEmpty()) {

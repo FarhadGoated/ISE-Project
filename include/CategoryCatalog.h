@@ -28,7 +28,10 @@ public:
     // Adds a category after checking it (2-digit id, unique id, name, acronym).
     bool add(const Category& category, QString* error = nullptr);
 
-    // Smallest unused id ("01" ... "99"); empty if all are taken.
+    bool edit(const Category& category, QString* error);
+    bool removeUnused(const QString& id, const class ProductCatalog& products, QString* error);
+
+    // Smallest unused id ("10" ... "99"); empty if all are taken.
     QString nextFreeId() const;
 
 private:

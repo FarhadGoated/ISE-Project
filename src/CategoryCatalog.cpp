@@ -24,8 +24,8 @@ bool isAsciiDigit(QChar c)
 // Rules for one category; the message has no line number.
 bool checkCategory(const Category& c, QString& err)
 {
-    if (c.id.size() != 2 || !isAsciiDigit(c.id.at(0)) || !isAsciiDigit(c.id.at(1))) {
-        err = QStringLiteral("category ID \"%1\" must be exactly two digits").arg(c.id);
+    if (c.id.size() != 2 || c.id.front() == QLatin1Char('0') || !isAsciiDigit(c.id.at(0)) || !isAsciiDigit(c.id.at(1))) {
+        err = QStringLiteral("category ID \"%1\" must be in the range 10 to 99").arg(c.id);
         return false;
     }
     if (c.name.isEmpty()) { err = QStringLiteral("category name is empty"); return false; }
@@ -160,9 +160,34 @@ bool CategoryCatalog::add(const Category& category, QString* error)
     return true;
 }
 
+bool CategoryCatalog::edit(const Category& category, QString* error)
+{
+    QString problem;
+    if (!checkCategory(category, problem)) { setError(error, problem); return false; }
+    for (auto& current : categories_) {
+        if (current.id == category.id) { current = category; return true; }
+    }
+    setError(error, "The category no longer exists.");
+    return false;
+}
+
+bool CategoryCatalog::removeUnused(const QString& id, const ProductCatalog& products, QString* error)
+{
+    for (const auto& product : products.products()) {
+        if (product.categoryId == id) {
+            setError(error, "Move this category's products before deleting it."); return false;
+        }
+    }
+    for (qsizetype i = 0; i < categories_.size(); ++i) {
+        if (categories_.at(i).id == id) { categories_.removeAt(i); return true; }
+    }
+    setError(error, "The category no longer exists.");
+    return false;
+}
+
 QString CategoryCatalog::nextFreeId() const
 {
-    for (int number = 1; number <= 99; ++number) {
+    for (int number = 10; number <= 99; ++number) {
         const QString id = QStringLiteral("%1").arg(number, 2, 10, QLatin1Char('0'));
         Category existing;
         if (!findById(id, existing)) return id;

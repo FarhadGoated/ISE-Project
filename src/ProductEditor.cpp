@@ -1,5 +1,10 @@
 // ProductEditor.cpp
 #include "ProductEditor.h"
+#include "BarcodeGenerator.h"
+#include "CheckoutStorage.h"
+#include <QLockFile>
+#include <QSaveFile>
+#include <QFile>
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -21,53 +26,13 @@ namespace shop {
 
 namespace {
 
-// ---- Barcode image (Code 39) ------------------------------------------------
-// Each character is 9 elements: bar, space, bar, space, ... ('n' narrow, 'w' wide).
-const char* codePattern(QChar c)
+QString nextProductId(const ProductCatalog& products)
 {
-    static const char* digits[10] = {
-        "nnnwwnwnn", "wnnwnnnnw", "nnwwnnnnw", "wnwwnnnnn", "nnnwwnnnw",
-        "wnnwwnnnn", "nnwwwnnnn", "nnnwnnwnw", "wnnwnnwnn", "nnwwnnwnn"};
-    static const char* star = "nwnnwnwnn";          // start / stop symbol
-    if (c == QLatin1Char('*')) return star;
-    return digits[c.unicode() - '0'];
-}
-
-// Draws "*123456*" as black bars on white and saves it as a PNG.
-bool saveBarcodeImage(const QString& digits, const QString& path, QString* error)
-{
-    const int narrow = 2, wide = 5, quiet = 20, barHeight = 80, textHeight = 22;
-    const QString text = QStringLiteral("*") + digits + QStringLiteral("*");
-
-    int width = 2 * quiet;
-    for (const QChar c : text) {
-        for (const char* p = codePattern(c); *p; ++p) width += (*p == 'w') ? wide : narrow;
-        width += narrow;                                   // gap between characters
+    Product existing;
+    for (qint64 i = 1; ; ++i) {
+        const QString id = QStringLiteral("P%1").arg(i, 3, 10, QLatin1Char('0'));
+        if (!products.findById(id, existing)) return id;
     }
-
-    QImage image(width, barHeight + textHeight, QImage::Format_RGB32);
-    image.fill(Qt::white);
-    QPainter painter(&image);
-    int x = quiet;
-    for (const QChar c : text) {
-        bool isBar = true;
-        for (const char* p = codePattern(c); *p; ++p) {
-            const int w = (*p == 'w') ? wide : narrow;
-            if (isBar) painter.fillRect(x, 0, w, barHeight, Qt::black);
-            x += w;
-            isBar = !isBar;
-        }
-        x += narrow;
-    }
-    painter.setPen(Qt::black);
-    painter.drawText(QRect(0, barHeight, width, textHeight), Qt::AlignCenter, digits);
-    painter.end();
-
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()) || !image.save(path, "PNG")) {
-        if (error) *error = QStringLiteral("Cannot write barcode image %1").arg(path);
-        return false;
-    }
-    return true;
 }
 
 // Small dialog that asks for the three category fields. Returns true if the
@@ -130,7 +95,10 @@ ProductEditor::ProductEditor(ProductCatalog& catalog, CategoryCatalog& categorie
     taxEdit_ = new QLineEdit;
     discountEdit_ = new QLineEdit;
     quantityEdit_ = new QLineEdit;
-    barcodeLabel_ = new QLabel;
+    barcodeEdit_ = new QLineEdit;
+    barcodeEdit_->setMaxLength(6);
+    barcodeEdit_->setPlaceholderText("Leave blank to generate from category");
+    barcodeEdit_->setValidator(new QRegularExpressionValidator(QRegularExpression("[0-9]{0,6}"),barcodeEdit_));
 
     auto* form = new QFormLayout;
     form->addRow(QStringLiteral("Category"), categoryRow);
@@ -142,7 +110,7 @@ ProductEditor::ProductEditor(ProductCatalog& catalog, CategoryCatalog& categorie
     form->addRow(QStringLiteral("Unit tax (PKR)"), taxEdit_);
     form->addRow(QStringLiteral("Unit discount (PKR)"), discountEdit_);
     form->addRow(QStringLiteral("Available quantity"), quantityEdit_);
-    form->addRow(QStringLiteral("Barcode"), barcodeLabel_);
+    form->addRow(QStringLiteral("Barcode"), barcodeEdit_);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     auto* layout = new QVBoxLayout(this);
@@ -155,7 +123,6 @@ ProductEditor::ProductEditor(ProductCatalog& catalog, CategoryCatalog& categorie
 
     if (editing_) {
         fillCategoryCombo(original_.categoryId);
-        categoryBox_->setEnabled(false);          // category is part of the printed barcode
         newCategoryButton->setEnabled(false);
         idEdit_->setText(original_.id);
         idEdit_->setReadOnly(true);               // other files refer to this ID
@@ -166,14 +133,20 @@ ProductEditor::ProductEditor(ProductCatalog& catalog, CategoryCatalog& categorie
         taxEdit_->setText(formatPaisa(original_.taxPaisa));
         discountEdit_->setText(formatPaisa(original_.discountPaisa));
         quantityEdit_->setText(formatQuantityMilli(original_.stockMilli, original_.unit));
-        barcodeLabel_->setText(original_.barcode);
+        barcodeEdit_->setText(original_.barcode);
     } else {
         fillCategoryCombo(QString());
         discountEdit_->setText(QStringLiteral("0.00"));
         taxEdit_->setText(QStringLiteral("0.00"));
         quantityEdit_->setText(QStringLiteral("0"));
-        barcodeLabel_->setText(QStringLiteral("(generated when you save)"));
+        idEdit_->setText(nextProductId(catalog_));
+        idEdit_->setReadOnly(true);
     }
+    connect(categoryBox_, &QComboBox::currentIndexChanged, this, [this] {
+        if (editing_ && categoryBox_->currentData().toString() == original_.categoryId)
+            barcodeEdit_->setText(original_.barcode);
+        else barcodeEdit_->clear();
+    });
 }
 
 void ProductEditor::fillCategoryCombo(const QString& selectId)
@@ -196,8 +169,12 @@ void ProductEditor::onNewCategory()
     if (!askCategory(this, categories_.nextFreeId(), category)) return;
 
     // Work on a copy; the real catalog changes only if the file is saved.
-    CategoryCatalog updated = categories_;
+    const QDir dir(catalog_.baseDirectory());
+    QLockFile lock(dir.filePath(".checkout.lock"));
+    if (!lock.tryLock(0)) { QMessageBox::warning(this,windowTitle(),"Catalog is busy."); return; }
+    CategoryCatalog updated;
     QString error;
+    if (!updated.load(dir.filePath("PCategory.txt"), &error)) { QMessageBox::warning(this,windowTitle(),error); return; }
     if (!updated.add(category, &error) || !updated.save(&error)) {
         QMessageBox::warning(this, windowTitle(), error);
         return;
@@ -230,38 +207,65 @@ void ProductEditor::onSave()
         return;
     }
 
-    // Change a copy first; the real catalog is replaced only after the file is saved.
-    ProductCatalog updated = catalog_;
-    bool ok = false;
-
-    if (editing_) {
-        product.barcode = original_.barcode;
-        product.categoryId = original_.categoryId;
-        product.barcodePath = original_.barcodePath;
-        ok = updated.updateProduct(product, &error);
-    } else {
-        product.categoryId = categoryBox_->currentData().toString();
-        if (product.categoryId.isEmpty()) {
-            QMessageBox::warning(this, windowTitle(), QStringLiteral("Create a category first (New category...)."));
-            return;
-        }
-        product.barcode = updated.nextBarcode(product.categoryId);
-        if (product.barcode.isEmpty()) {
-            QMessageBox::warning(this, windowTitle(), QStringLiteral("This category has no free barcode numbers left."));
-            return;
-        }
-        product.barcodePath = QStringLiteral("barcodes/%1.png").arg(product.barcode);
-
-        ok = updated.addProduct(product, &error)
-             && saveBarcodeImage(product.barcode, updated.resolveBarcodePath(product), &error);
+    const QDir dir(catalog_.baseDirectory());
+    QLockFile lock(dir.filePath(".checkout.lock"));
+    if (!lock.tryLock(0)) { QMessageBox::warning(this,windowTitle(),"Catalog is busy."); return; }
+    ProductCatalog updated;
+    CategoryCatalog categories;
+    store::CheckoutStorage storage(dir.absolutePath(), nullptr);
+    if (!updated.load(catalog_.filePath(), &error) ||
+        !categories.load(dir.filePath("PCategory.txt"), &error) || !storage.load()) {
+        QMessageBox::warning(this,windowTitle(),error.isEmpty() ? storage.loadErrors().join('\n') : error); return;
     }
-
-    if (ok) ok = updated.save(updated.filePath(), &error);
-    if (!ok) {
-        QMessageBox::warning(this, windowTitle(), error);
-        return;
+    if (editing_ && catalog_.serialize() != updated.serialize()) {
+        QMessageBox::warning(this,windowTitle(),"The catalog changed. Reopen this product to edit its latest values."); return;
     }
-
+    if (editing_ && product.unit != original_.unit) {
+        for (const QString& id : storage.orderIds()) {
+            store::OrderRecord record;
+            storage.order(id,&record);
+            for (const auto& line : record.lines) {
+                if (line.productId == product.id) {
+                    QMessageBox::warning(this,windowTitle(),"A saved order uses this unit. Create a new product for a different unit.");
+                    return;
+                }
+            }
+        }
+    }
+    if (!editing_) product.id = nextProductId(updated);
+    product.categoryId = categoryBox_->currentData().toString();
+    Category category;
+    if (!categories.findById(product.categoryId, category)) {
+        QMessageBox::warning(this,windowTitle(),"Select an existing category first."); return;
+    }
+    product.barcode = barcodeEdit_->text().trimmed();
+    if (product.barcode.isEmpty()) {
+        product.barcode = editing_ && original_.categoryId == product.categoryId
+            ? original_.barcode : updated.nextBarcode(product.categoryId);
+    }
+    product.barcodePath = editing_ && product.barcode == original_.barcode
+        ? original_.barcodePath : QStringLiteral("barcodes/%1.png").arg(product.barcode);
+    if (product.stockMilli < storage.reservedStock(product.id,QDateTime::currentDateTime())) {
+        QMessageBox::warning(this,windowTitle(),"Physical stock cannot be lower than reserved stock."); return;
+    }
+    if (!(editing_ ? updated.updateProduct(product,&error) : updated.addProduct(product,&error))) {
+        QMessageBox::warning(this,windowTitle(),error); return;
+    }
+    const QString path = updated.resolveBarcodePath(product);
+    const bool createImage = !editing_ || product.barcode != original_.barcode || !QFileInfo::exists(path);
+    const bool fileExisted = QFileInfo::exists(path);
+    if (createImage) {
+        QImage image = BarcodeGenerator::generateCode39(product.barcode,&error);
+        QSaveFile file(path);
+        if (image.isNull() || !QDir().mkpath(QFileInfo(path).absolutePath()) ||
+            !file.open(QIODevice::WriteOnly) || !image.save(&file,"PNG") || !file.commit()) {
+            QMessageBox::warning(this,windowTitle(),error.isEmpty() ? "Cannot save barcode PNG: " + path : error); return;
+        }
+    }
+    if (!updated.save(catalog_.filePath(),&error)) {
+        if (createImage && !fileExisted) QFile::remove(path);
+        QMessageBox::warning(this,windowTitle(),error); return;
+    }
     catalog_ = updated;
     accept();
 }

@@ -106,7 +106,7 @@ bool checkProduct(const Product& p, QString& err)
         return false;
     }
 
-    if (p.categoryId.size() != 2 || !isAsciiDigit(p.categoryId.at(0)) || !isAsciiDigit(p.categoryId.at(1))) {
+    if (p.categoryId.size() != 2 || p.categoryId.front() == QLatin1Char('0') || !isAsciiDigit(p.categoryId.at(0)) || !isAsciiDigit(p.categoryId.at(1))) {
         err = QStringLiteral("category ID \"%1\" must be exactly two digits").arg(p.categoryId);
         return false;
     }
@@ -127,8 +127,8 @@ bool checkProduct(const Product& p, QString& err)
         err = QStringLiteral("price, tax, discount and quantity cannot be negative");
         return false;
     }
-    if (p.pricePaisa > kInt64Max - p.taxPaisa || p.discountPaisa > p.pricePaisa + p.taxPaisa) {
-        err = QStringLiteral("unit discount cannot exceed unit price plus tax");
+    if (p.pricePaisa > kInt64Max - p.taxPaisa || p.discountPaisa > p.pricePaisa) {
+        err = QStringLiteral("price and tax exceed the supported range, or the unit discount exceeds the price");
         return false;
     }
     if (p.unit == Unit::Count && p.stockMilli % 1000 != 0) {
@@ -551,7 +551,7 @@ QString ProductCatalog::filePath() const
 
 QString ProductCatalog::nextBarcode(const QString& categoryId) const
 {
-    if (categoryId.size() != 2 || !isAsciiDigit(categoryId.at(0)) || !isAsciiDigit(categoryId.at(1)))
+    if (categoryId.size() != 2 || categoryId.front() == QLatin1Char('0') || !isAsciiDigit(categoryId.at(0)) || !isAsciiDigit(categoryId.at(1)))
         return QString();
 
     for (int serial = 1; serial <= 9999; ++serial) {
@@ -591,8 +591,8 @@ bool ProductCatalog::updateProduct(const Product& product, QString* error)
         setError(error, QStringLiteral("unknown product ID \"%1\"").arg(product.id));
         return false;
     }
-    if (product.barcode != existing.barcode || product.categoryId != existing.categoryId) {
-        setError(error, QStringLiteral("the barcode and category of an existing product cannot be changed"));
+    if (product.barcode != existing.barcode && products_.contains(product.barcode)) {
+        setError(error, QStringLiteral("Barcode %1 is already assigned.").arg(product.barcode));
         return false;
     }
 
@@ -602,6 +602,12 @@ bool ProductCatalog::updateProduct(const Product& product, QString* error)
         return false;
     }
 
+    if (existing.barcode != product.barcode) {
+        const auto index = order_.indexOf(existing.barcode);
+        if (index < 0) { setError(error, "Catalog index is inconsistent."); return false; }
+        order_[index] = product.barcode;
+        products_.remove(existing.barcode);
+    }
     products_[product.barcode] = product;
     if (error) error->clear();
     return true;
