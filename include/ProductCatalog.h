@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 namespace shop {
 
@@ -41,10 +42,30 @@ public:
     // Convenience: serialize() through QSaveFile (atomic replace).
     bool save(const QString& productPath, QString* error = nullptr) const;
 
+    // ---- Increment 3: manager features ------------------------------------
+    // Path given to the last successful load(). Empty before load().
+    QString filePath() const;
+
+    // Next unused barcode for a category: the 2-digit category id followed by
+    // a 4-digit running number (e.g. "120001"). Empty if the category is full.
+    QString nextBarcode(const QString& categoryId) const;
+
+    // Appends a new product (after full validation, unique ID and barcode).
+    bool addProduct(const Product& product, QString* error = nullptr);
+
+    // Replaces the product with the same ID. Its barcode and category can
+    // never change (the barcode is already printed on the goods).
+    bool updateProduct(const Product& product, QString* error = nullptr);
+
+    // Sets the available quantity (inventory update by the manager).
+    bool setStock(const QString& productId, qint64 quantityMilli,
+                  QString* error = nullptr);
+
 private:
     QHash<QString, Product> products_;   // key: barcode
     QVector<QString> order_;             // barcodes in file order
     QString baseDir_;
+    QString filePath_;
 };
 
 // ---- Shared number helpers (money = paisa, quantity = thousandths) --------
@@ -64,6 +85,15 @@ bool parsePaisa(const QString& text, qint64& paisa, QString* error = nullptr);
 // Result is non-negative; callers apply their own "must be > 0" rule.
 bool parseQuantityMilli(const QString& text, Unit unit, qint64& quantityMilli,
                         QString* error = nullptr);
+
+// Splits one record (the final '#' already removed) into values. Double
+// quotes group a value that contains spaces; inside quotes \" and \\ escape.
+// Shared with CategoryCatalog so both files use the same text rules.
+bool tokenizeRecord(const QString& record, QStringList& fields, QString& error);
+
+// Writes one value for a record: quoted when forced, empty, or when it holds
+// whitespace, a quote or a backslash.
+QString quoteField(const QString& value, bool force);
 
 // Six ASCII digits, leading zeros allowed. (See note in ProductCatalog.cpp:
 // swap the body for the Increment 1 validator if it has a different name.)

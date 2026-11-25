@@ -95,10 +95,97 @@ bool parseScaled(const QString& text, int scaleDigits, bool allowFraction,
     return true;
 }
 
+// Rules every product must follow, whether it came from Product.txt or from
+// the editor. The message does not include a line number.
+bool checkProduct(const Product& p, QString& err)
+{
+    if (p.id.isEmpty()) { err = QStringLiteral("product ID is empty"); return false; }
+
+    if (!isValidBarcodeText(p.barcode)) {
+        err = QStringLiteral("barcode \"%1\" must be exactly six digits").arg(p.barcode);
+        return false;
+    }
+
+    if (p.categoryId.size() != 2 || !isAsciiDigit(p.categoryId.at(0)) || !isAsciiDigit(p.categoryId.at(1))) {
+        err = QStringLiteral("category ID \"%1\" must be exactly two digits").arg(p.categoryId);
+        return false;
+    }
+    if (p.categoryId != p.barcode.left(2)) {
+        err = QStringLiteral("category ID %1 must match the first two digits of barcode %2")
+                  .arg(p.categoryId, p.barcode);
+        return false;
+    }
+
+    if (p.acronym.isEmpty() || p.acronym.size() > 8) {
+        err = QStringLiteral("acronym must be 1 to 8 characters, got \"%1\"").arg(p.acronym);
+        return false;
+    }
+
+    if (p.name.isEmpty()) { err = QStringLiteral("product name is empty"); return false; }
+
+    if (p.pricePaisa < 0 || p.taxPaisa < 0 || p.discountPaisa < 0 || p.stockMilli < 0) {
+        err = QStringLiteral("price, tax, discount and quantity cannot be negative");
+        return false;
+    }
+    if (p.pricePaisa > kInt64Max - p.taxPaisa || p.discountPaisa > p.pricePaisa + p.taxPaisa) {
+        err = QStringLiteral("unit discount cannot exceed unit price plus tax");
+        return false;
+    }
+    if (p.unit == Unit::Count && p.stockMilli % 1000 != 0) {
+        err = QStringLiteral("a count product must have a whole-number quantity");
+        return false;
+    }
+    return true;
+}
+
+// Turns one tokenized record into a product. Message has no line number
+// (the caller adds it).
+bool buildProduct(const QStringList& f, Product& p, QString& err)
+{
+    if (f.size() != 11) {
+        err = QStringLiteral("expected 11 fields before #, found %1").arg(f.size());
+        return false;
+    }
+
+    p.id = f.at(0);
+    p.barcode = f.at(1);
+    p.acronym = f.at(2);
+    p.name = f.at(3);
+
+    const QString unitText = f.at(4).toLower();
+    if (unitText == QLatin1String("count")) {
+        p.unit = Unit::Count;
+    } else if (unitText == QLatin1String("weight")) {
+        p.unit = Unit::Weight;
+    } else {
+        err = QStringLiteral("unit must be \"count\" or \"weight\", got \"%1\"").arg(f.at(4));
+        return false;
+    }
+
+    QString detail;
+    if (!parsePaisa(f.at(5), p.pricePaisa, &detail)) { err = QStringLiteral("unit price: ") + detail; return false; }
+    if (!parsePaisa(f.at(6), p.taxPaisa, &detail)) { err = QStringLiteral("unit tax: ") + detail; return false; }
+    if (!parsePaisa(f.at(7), p.discountPaisa, &detail)) { err = QStringLiteral("unit discount: ") + detail; return false; }
+    if (!parseQuantityMilli(f.at(8), p.unit, p.stockMilli, &detail)) {
+        err = QStringLiteral("available quantity: ") + detail;
+        return false;
+    }
+
+    p.barcodePath = f.at(9);
+    p.categoryId = f.at(10);
+    return checkProduct(p, err);
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Shared record helpers (also used by CategoryCatalog)
+// ---------------------------------------------------------------------------
+
 // Split one record (terminator already removed) into whitespace-separated
 // values. Double quotes group values that contain spaces; inside quotes
 // \" is a quote and \\ is a backslash.
-bool tokenize(const QString& s, QStringList& out, QString& err)
+bool tokenizeRecord(const QString& s, QStringList& out, QString& err)
 {
     const int n = static_cast<int>(s.size());
     int i = 0;
@@ -161,7 +248,7 @@ bool tokenize(const QString& s, QStringList& out, QString& err)
 }
 
 // Quote when forced, empty, or containing whitespace / quote / backslash.
-QString quoted(const QString& value, bool force)
+QString quoteField(const QString& value, bool force)
 {
     bool need = force || value.isEmpty();
     for (const QChar c : value) {
@@ -182,63 +269,6 @@ QString quoted(const QString& value, bool force)
     out += QLatin1Char('"');
     return out;
 }
-
-// Validates a tokenized record and fills `p`. On failure returns false with a
-// message that does not include the line number (the caller adds it).
-bool buildProduct(const QStringList& f, Product& p, QString& err)
-{
-    if (f.size() != 10) {
-        err = QStringLiteral("expected 10 fields before #, found %1").arg(f.size());
-        return false;
-    }
-
-    p.id = f.at(0);
-    if (p.id.isEmpty()) { err = QStringLiteral("product ID is empty"); return false; }
-
-    p.barcode = f.at(1);
-    if (!isValidBarcodeText(p.barcode)) {
-        err = QStringLiteral("barcode \"%1\" must be exactly six digits").arg(p.barcode);
-        return false;
-    }
-
-    p.acronym = f.at(2);
-    if (p.acronym.isEmpty() || p.acronym.size() > 8) {
-        err = QStringLiteral("acronym must be 1 to 8 characters, got \"%1\"").arg(p.acronym);
-        return false;
-    }
-
-    p.name = f.at(3);
-    if (p.name.isEmpty()) { err = QStringLiteral("product name is empty"); return false; }
-
-    const QString unitText = f.at(4).toLower();
-    if (unitText == QLatin1String("count")) {
-        p.unit = Unit::Count;
-    } else if (unitText == QLatin1String("weight")) {
-        p.unit = Unit::Weight;
-    } else {
-        err = QStringLiteral("unit must be \"count\" or \"weight\", got \"%1\"").arg(f.at(4));
-        return false;
-    }
-
-    QString detail;
-    if (!parsePaisa(f.at(5), p.pricePaisa, &detail)) { err = QStringLiteral("unit price: ") + detail; return false; }
-    if (!parsePaisa(f.at(6), p.taxPaisa, &detail)) { err = QStringLiteral("unit tax: ") + detail; return false; }
-    if (!parsePaisa(f.at(7), p.discountPaisa, &detail)) { err = QStringLiteral("unit discount: ") + detail; return false; }
-    if (p.pricePaisa > kInt64Max - p.taxPaisa || p.discountPaisa > p.pricePaisa + p.taxPaisa) {
-        err = QStringLiteral("unit discount cannot exceed unit price plus tax");
-        return false;
-    }
-
-    if (!parseQuantityMilli(f.at(8), p.unit, p.stockMilli, &detail)) {
-        err = QStringLiteral("available quantity: ") + detail;
-        return false;
-    }
-
-    p.barcodePath = f.at(9);
-    return true;
-}
-
-} // namespace
 
 // ---------------------------------------------------------------------------
 // Number helpers
@@ -367,7 +397,7 @@ bool ProductCatalog::load(const QString& productPath, QString* error)
 
         QStringList fields;
         QString problem;
-        if (!tokenize(line, fields, problem)) return fail(problem);
+        if (!tokenizeRecord(line, fields, problem)) return fail(problem);
 
         Product product;
         if (!buildProduct(fields, product, problem)) return fail(problem);
@@ -394,6 +424,7 @@ bool ProductCatalog::load(const QString& productPath, QString* error)
     products_ = std::move(products);
     order_ = std::move(order);
     baseDir_ = info.absoluteDir().absolutePath();
+    filePath_ = info.absoluteFilePath();
     if (error) error->clear();
     return true;
 }
@@ -474,16 +505,17 @@ QByteArray ProductCatalog::serialize() const
     for (const QString& key : order_) {
         const Product& p = products_.value(key);
         const QStringList fields = {
-            quoted(p.id, false),
-            quoted(p.barcode, false),
-            quoted(p.acronym, false),
-            quoted(p.name, true),
+            quoteField(p.id, false),
+            quoteField(p.barcode, false),
+            quoteField(p.acronym, false),
+            quoteField(p.name, true),
             p.unit == Unit::Weight ? QStringLiteral("weight") : QStringLiteral("count"),
             formatPaisa(p.pricePaisa),
             formatPaisa(p.taxPaisa),
             formatPaisa(p.discountPaisa),
             formatQuantityMilli(p.stockMilli, p.unit),
-            quoted(p.barcodePath, false),
+            quoteField(p.barcodePath, false),
+            quoteField(p.categoryId, false),
             QStringLiteral("#"),
         };
         text += fields.join(QLatin1Char(' '));
@@ -506,6 +538,94 @@ bool ProductCatalog::save(const QString& productPath, QString* error) const
     }
     if (error) error->clear();
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Increment 3: manager features
+// ---------------------------------------------------------------------------
+
+QString ProductCatalog::filePath() const
+{
+    return filePath_;
+}
+
+QString ProductCatalog::nextBarcode(const QString& categoryId) const
+{
+    if (categoryId.size() != 2 || !isAsciiDigit(categoryId.at(0)) || !isAsciiDigit(categoryId.at(1)))
+        return QString();
+
+    for (int serial = 1; serial <= 9999; ++serial) {
+        const QString candidate = categoryId + QStringLiteral("%1").arg(serial, 4, 10, QLatin1Char('0'));
+        if (!products_.contains(candidate)) return candidate;
+    }
+    return QString();   // all 9999 numbers of this category are used
+}
+
+bool ProductCatalog::addProduct(const Product& product, QString* error)
+{
+    QString problem;
+    if (!checkProduct(product, problem)) {
+        setError(error, problem);
+        return false;
+    }
+    if (products_.contains(product.barcode)) {
+        setError(error, QStringLiteral("barcode %1 is already used").arg(product.barcode));
+        return false;
+    }
+    Product existing;
+    if (findById(product.id, existing)) {
+        setError(error, QStringLiteral("product ID \"%1\" is already used").arg(product.id));
+        return false;
+    }
+
+    products_.insert(product.barcode, product);
+    order_.append(product.barcode);
+    if (error) error->clear();
+    return true;
+}
+
+bool ProductCatalog::updateProduct(const Product& product, QString* error)
+{
+    Product existing;
+    if (!findById(product.id, existing)) {
+        setError(error, QStringLiteral("unknown product ID \"%1\"").arg(product.id));
+        return false;
+    }
+    if (product.barcode != existing.barcode || product.categoryId != existing.categoryId) {
+        setError(error, QStringLiteral("the barcode and category of an existing product cannot be changed"));
+        return false;
+    }
+
+    QString problem;
+    if (!checkProduct(product, problem)) {
+        setError(error, problem);
+        return false;
+    }
+
+    products_[product.barcode] = product;
+    if (error) error->clear();
+    return true;
+}
+
+bool ProductCatalog::setStock(const QString& productId, qint64 quantityMilli, QString* error)
+{
+    if (quantityMilli < 0) {
+        setError(error, QStringLiteral("available quantity cannot be negative"));
+        return false;
+    }
+    for (const QString& key : order_) {
+        Product& product = products_[key];
+        if (product.id != productId) continue;
+        if (product.unit == Unit::Count && quantityMilli % 1000 != 0) {
+            setError(error, QStringLiteral("%1 is counted in whole units").arg(product.name));
+            return false;
+        }
+        product.stockMilli = quantityMilli;
+        if (error) error->clear();
+        return true;
+    }
+    setError(error, QStringLiteral("unknown product ID \"%1\"").arg(productId));
+    return false;
 }
 
 } // namespace shop

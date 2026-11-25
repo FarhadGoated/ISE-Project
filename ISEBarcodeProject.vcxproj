@@ -144,7 +144,7 @@
     <ClInclude Include="include\BillPdf.h" />
     <ClInclude Include="include\BillStorage.h" />
     <ClInclude Include="include\CategoryCatalog.h" />
-    <ClInclude Include="include\InventoryDialog.h" />
+<QtMoc Include="include\InventoryDialog.h" />
     <ClInclude Include="include\ManagerAccess.h" />
     <ClInclude Include="include\ManagerWindow.h" />
     <ClInclude Include="include\Order.h" />
@@ -154,7 +154,7 @@
     <ClInclude Include="include\PosTheme.h" />
     <ClInclude Include="include\Product.h" />
     <ClInclude Include="include\ProductCatalog.h" />
-    <ClInclude Include="include\ProductEditor.h" />
+<QtMoc Include="include\ProductEditor.h" />
     <ClInclude Include="include\Reports.h" />
     <ClInclude Include="include\ScanDialog.h" />
     <ClInclude Include="include\SeasonDiscounts.h" />
