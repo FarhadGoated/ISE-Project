@@ -1,12 +1,23 @@
 #include "ManagerWindow.h"
+#include "MainWindow.h"
 
 #include "ManagerAccess.h"
+#include "CheckoutStorage.h"
+#include "CategoryCatalog.h"
+#include "ProductEditor.h"
+#include "InventoryDialog.h"
+#include "Reports.h"
+#include "BillPdf.h"
+#include <QFormLayout>
+#include <QLockFile>
+#include <QShowEvent>
 #include "ProductCatalog.h"
 #include "SeasonsDialog.h"
 #include <QSizePolicy>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -134,83 +145,228 @@ namespace shop {
             QMessageBox::information(parent, title, QStringLiteral("Manager PIN updated."));
         }
 
-        QWidget* makeInventoryPage(const QString& dataDir, QWidget* parent)
+        struct EditRequest {
+            QString billId;
+            bool approved = false;
+        };
+        // Each running till keeps manager approvals for its own requests.
+        QHash<QString, QHash<QString, EditRequest>> requests;
+
+        class StockPage final : public QWidget {
+        public:
+            StockPage(const QString& dir, QWidget* parent) : QWidget(parent), dir_(dir) {
+                auto* layout = new QVBoxLayout(this);
+                status_ = new QLabel(this);
+                layout->addWidget(status_);
+            }
+        protected:
+            void showEvent(QShowEvent* event) override {
+                QWidget::showEvent(event);
+                if (editor_) return;
+                QString error;
+                if (!catalog_.load(QDir(dir_).filePath("Product.txt"), &error)) {
+                    status_->setText(error); return;
+                }
+                status_->hide();
+                editor_ = new InventoryDialog(catalog_, this, true);
+                layout()->addWidget(editor_);
+            }
+        private:
+            QString dir_;
+            ProductCatalog catalog_;
+            QLabel* status_;
+            InventoryDialog* editor_ = nullptr;
+        };
+
+        class CatalogPage final : public QWidget {
+        public:
+            CatalogPage(const QString& directory, bool products, QWidget* parent)
+                : QWidget(parent), dir_(directory), products_(products)
+            {
+                auto* layout = new QVBoxLayout(this);
+                auto* tools = new QHBoxLayout;
+                auto* add = new QPushButton(products ? "Add product" : "Add category", this);
+                auto* edit = new QPushButton("Edit selected", this);
+                auto* remove = new QPushButton("Delete unused category", this);
+                remove->setVisible(!products);
+                auto* reload = new QPushButton("Refresh", this);
+                for (auto* button : { add,edit,remove,reload }) tools->addWidget(button);
+                layout->addLayout(tools);
+                const QStringList headers = products ? QStringList{ "ID","Name","Barcode","Category","Unit price (PKR)" }
+                : QStringList{ "ID","Name","Acronym" };
+                table_ = new QTableWidget(0, headers.size(), this);
+                table_->setHorizontalHeaderLabels(headers);
+                table_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+                table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+                table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+                table_->setSelectionMode(QAbstractItemView::SingleSelection);
+                layout->addWidget(table_);
+                status_ = new QLabel(this); layout->addWidget(status_);
+                connect(add, &QPushButton::clicked, this, [this] { change(true, false); });
+                connect(edit, &QPushButton::clicked, this, [this] { change(false, false); });
+                connect(remove, &QPushButton::clicked, this, [this] { change(false, true); });
+                connect(reload, &QPushButton::clicked, this, [this] { refresh(); });
+                connect(table_, &QTableWidget::cellDoubleClicked, this, [this] { change(false, false); });
+            }
+        protected:
+            void showEvent(QShowEvent* event) override { QWidget::showEvent(event); refresh(); }
+        private:
+            bool load(ProductCatalog& products, CategoryCatalog& categories, QString& error) {
+                return products.load(dir_.filePath("Product.txt"), &error) &&
+                    categories.load(dir_.filePath("PCategory.txt"), &error);
+            }
+            void append(const QStringList& fields) {
+                int row = table_->rowCount();
+                table_->insertRow(row);
+                for (int i = 0; i < fields.size(); ++i) table_->setItem(row, i, new QTableWidgetItem(fields.at(i)));
+            }
+            void refresh() {
+                table_->setRowCount(0);
+                ProductCatalog products;
+                CategoryCatalog categories;
+                QString error;
+                if (!load(products, categories, error)) { status_->setText(error); return; }
+                if (products_) {
+                    for (const auto& p : products.products()) append({ p.id,p.name,p.barcode,p.categoryId,formatPaisa(p.pricePaisa) });
+                }
+                else {
+                    for (const auto& c : categories.categories()) append({ c.id,c.name,c.acronym });
+                }
+                status_->clear();
+            }
+            void change(bool adding, bool deleting) {
+                if (!adding && table_->currentRow() < 0) { status_->setText("Select a row first."); return; }
+                const QString selected = adding ? QString() : table_->item(table_->currentRow(), 0)->text();
+                ProductCatalog products;
+                CategoryCatalog categories;
+                QString error;
+                if (!load(products, categories, error)) { status_->setText(error); return; }
+                if (products_) {
+                    Product existing;
+                    if (!adding && !products.findById(selected, existing)) { refresh(); return; }
+                    ProductEditor editor(products, categories, this, selected);
+                    editor.exec(); refresh(); return;
+                }
+                Category original, result;
+                if (!adding && !categories.findById(selected, original)) { refresh(); return; }
+                if (deleting) {
+                    if (QMessageBox::question(this, "Delete category", "Delete " + original.name + "?") != QMessageBox::Yes) return;
+                }
+                else {
+                    QDialog dialog(this);
+                    dialog.setWindowTitle(adding ? "Add category" : "Edit category");
+                    auto* form = new QFormLayout(&dialog);
+                    auto* id = new QLineEdit(adding ? categories.nextFreeId() : selected, &dialog);
+                    id->setReadOnly(!adding); id->setMaxLength(2);
+                    auto* name = new QLineEdit(original.name, &dialog);
+                    auto* acronym = new QLineEdit(original.acronym, &dialog); acronym->setMaxLength(8);
+                    form->addRow("ID (10 to 99)", id); form->addRow("Name", name); form->addRow("Acronym", acronym);
+                    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+                    form->addRow(buttons);
+                    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+                    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+                    if (dialog.exec() != QDialog::Accepted) return;
+                    result = { id->text().trimmed(),name->text().trimmed(),acronym->text().trimmed() };
+                }
+                QLockFile lock(dir_.filePath(".checkout.lock"));
+                if (!lock.tryLock(0)) { status_->setText("Catalog is busy. Try again."); return; }
+                if (!load(products, categories, error)) { status_->setText(error); return; }
+                Category latest;
+                if (!adding && (!categories.findById(selected, latest) ||
+                    latest.name != original.name || latest.acronym != original.acronym)) {
+                    refresh(); status_->setText("The category changed. Review it again."); return;
+                }
+                bool ok = deleting ? categories.removeUnused(selected, products, &error) :
+                    adding ? categories.add(result, &error) : categories.edit(result, &error);
+                if (!ok || !categories.save(&error)) { status_->setText(error); return; }
+                refresh();
+            }
+            QDir dir_;
+            bool products_;
+            QTableWidget* table_;
+            QLabel* status_;
+        };
+
+        QWidget* approvalPage(const QString& dir, QWidget* parent)
         {
             auto* page = new QWidget(parent);
             auto* layout = new QVBoxLayout(page);
-            auto* heading = new QLabel(QStringLiteral("Inventory"), page);
-            heading->setObjectName(QStringLiteral("pageHeading"));
-            auto* refreshButton = new QPushButton(QStringLiteral("Refresh"), page);
-            auto* titleRow = new QHBoxLayout;
-            titleRow->addWidget(heading);
-            titleRow->addStretch();
-            titleRow->addWidget(refreshButton);
-            layout->addLayout(titleRow);
-
-            auto* table = new QTableWidget(0, 4, page);
-            table->setObjectName(QStringLiteral("managerInventoryTable"));
-            table->setHorizontalHeaderLabels({ QStringLiteral("Product"), QStringLiteral("Barcode"),
-                                              QStringLiteral("Unit"), QStringLiteral("Stock on hand") });
+            auto* table = new QTableWidget(0, 3, page);
+            table->setHorizontalHeaderLabels({ "Order ID", "Customer", "Approval status" });
             table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-            table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+            table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+            table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+            table->verticalHeader()->setDefaultSectionSize(38);
             table->verticalHeader()->hide();
-            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
             table->setSelectionBehavior(QAbstractItemView::SelectRows);
+            table->setSelectionMode(QAbstractItemView::SingleSelection);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
             table->setAlternatingRowColors(true);
-            layout->addWidget(table, 1);
-
+            table->setShowGrid(false);
+            auto* approve = new QPushButton("Approve selected revision", page);
             auto* status = new QLabel(page);
-            status->setTextFormat(Qt::PlainText);
-            status->setWordWrap(true);
-            layout->addWidget(status);
-
-            const QString path = QDir(dataDir).filePath(QStringLiteral("Product.txt"));
-            const auto refresh = [table, status, path] {
-                ProductCatalog catalog;
-                QString error;
+            layout->addWidget(table, 1);
+            auto* footer = new QHBoxLayout;
+            footer->addWidget(status, 1);
+            footer->addWidget(approve);
+            layout->addLayout(footer);
+            const auto refresh = [=] {
                 table->setRowCount(0);
-                if (!catalog.load(path, &error)) {
-                    status->setText(error.isEmpty()
-                        ? QStringLiteral("Could not load Product.txt.") : error);
-                    return;
+                approve->setEnabled(false);
+                store::CheckoutStorage storage(dir, nullptr);
+                if (!storage.load()) { status->setText(storage.loadErrors().join('\n')); return; }
+                for (const auto& row : storage.ordersWithStatus(store::Status::Paid)) {
+                    if (!storage.checkPaidEditWindow(row.orderId, QDateTime::currentDateTime()).ok) continue;
+                    const auto request = requests.value(dir).value(row.orderId);
+                    const bool current = request.billId == row.activeBillId;
+                    QString state = !current ? "Eligible" : request.approved ? "Approved" : "Requested";
+                    const int index = table->rowCount();
+                    table->insertRow(index);
+                    auto* id = new QTableWidgetItem(row.orderId);
+                    id->setData(Qt::UserRole, row.activeBillId);
+                    table->setItem(index, 0, id);
+                    table->setItem(index, 1, new QTableWidgetItem(row.customerName));
+                    table->setItem(index, 2, new QTableWidgetItem(state));
                 }
-
-                const auto products = catalog.products();
-                for (const Product& product : products) {
-                    const int row = table->rowCount();
-                    table->insertRow(row);
-                    table->setItem(row, 0, new QTableWidgetItem(product.name));
-                    table->setItem(row, 1, new QTableWidgetItem(product.barcode));
-                    table->setItem(row, 2, new QTableWidgetItem(
-                        product.unit == Unit::Count ? QStringLiteral("Pieces") : QStringLiteral("kg")));
-                    auto* quantity = new QTableWidgetItem(formatQuantityMilli(product.stockMilli, product.unit));
-                    quantity->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-                    table->setItem(row, 3, quantity);
-                }
-                status->setText(QStringLiteral("%1 products").arg(products.size()));
+                status->setText(table->rowCount() ? "Each approval covers one saved revision." : "No eligible paid orders.");
                 };
-            QObject::connect(refreshButton, &QPushButton::clicked, page, refresh);
-            refresh();
-            return page;
-        }
-
-        void addPendingPage(QListWidget* navigation, QStackedWidget* pages,
-            const QString& title, const QString& status)
-        {
-            navigation->addItem(title);
-            auto* page = new QWidget(pages);
-            auto* layout = new QVBoxLayout(page);
-            auto* heading = new QLabel(title, page);
-            heading->setObjectName(QStringLiteral("pageHeading"));
-            auto* detail = new QLabel(status, page);
-            detail->setWordWrap(true);
-            layout->addWidget(heading);
-            layout->addWidget(detail);
-            layout->addStretch();
-            pages->addWidget(page);
+            QObject::connect(table, &QTableWidget::itemSelectionChanged, page, [=] {
+                approve->setEnabled(!table->selectedItems().isEmpty());
+                });
+            QObject::connect(approve, &QPushButton::clicked, page, [=] {
+                const auto selected = table->selectedRanges();
+                if (selected.isEmpty()) return;
+                const auto* id = table->item(selected.constFirst().topRow(), 0);
+                if (!id) return;
+                requests[dir][id->text()] = { id->data(Qt::UserRole).toString(), true };
+                refresh();
+                });
+            refresh(); return page;
         }
 
     } // namespace
+
+    bool authorizeManager(QWidget* parent, const QString& action)
+    {
+        return !askPin(parent, action, "Enter manager PIN", verifyManagerPin, "Incorrect PIN. Try again.").isEmpty();
+    }
+
+    bool requestPaidEdit(QWidget* parent, const QString& dir, const QString& id, const QString& billId)
+    {
+        const auto request = requests.value(dir).value(id);
+        if (request.billId == billId && request.approved) return true;
+        requests[dir][id] = { billId,false };
+        if (!authorizeManager(parent, "Approve edit for order " + id)) {
+            QMessageBox::information(parent, "Approval requested", "The manager can approve order " + id +
+                " under Paid Order Approvals. Reopen it after approval.");
+            return false;
+        }
+        requests[dir][id].approved = true;
+        return true;
+    }
+
+    void finishPaidEdit(const QString& dir, const QString& id) { requests[dir].remove(id); }
 
     void openManagerWindow(QWidget* parent, const QString& dataDir)
     {
@@ -224,7 +380,7 @@ namespace shop {
         QDialog dialog(parent);
         dialog.setWindowTitle(title);
         dialog.setObjectName(QStringLiteral("managerDashboard"));
-        dialog.resize(820, 500);
+        dialog.resize(1050, 620);
 
         auto* layout = new QVBoxLayout(&dialog);
         layout->setContentsMargins(20, 18, 20, 16);
@@ -239,24 +395,34 @@ namespace shop {
         layout->addLayout(titleRow);
 
         auto* navigation = new QListWidget(&dialog);
+        navigation->setObjectName("managerNavigation");
         navigation->setAccessibleName(QStringLiteral("Manager sections"));
-        navigation->setFixedWidth(170);
+        navigation->setFixedWidth(188);
         auto* pages = new QStackedWidget(&dialog);
-        navigation->addItem(QStringLiteral("Inventory"));
-        pages->addWidget(makeInventoryPage(dataDir, pages));
-        addPendingPage(navigation, pages, QStringLiteral("Categories"),
-            QStringLiteral("Category management is pending."));
-        addPendingPage(navigation, pages, QStringLiteral("Products"),
-            QStringLiteral("Adding and editing products is pending."));
-        navigation->addItem(QStringLiteral("Seasonal Discounts"));
-        pages->addWidget(makeSeasonsPage(dataDir, pages));
-        addPendingPage(navigation, pages, QStringLiteral("Reports"),
-            QStringLiteral("Reports will appear here once order and bill records are connected."));
-        addPendingPage(navigation, pages, QStringLiteral("Paid Order Approvals"),
-            QStringLiteral("Approval requests will appear here once paid-order editing is connected."));
+        const auto section = [&](const QString& name, QWidget* page) {
+            navigation->addItem(name); pages->addWidget(page);
+            };
+        section("Inventory", new StockPage(dataDir, pages));
+        section("Categories", new CatalogPage(dataDir, false, pages));
+        section("Products", new CatalogPage(dataDir, true, pages));
+        section("Seasonal Discounts", makeSeasonsPage(dataDir, pages));
+        section("Reports", makeReportsPage(dataDir, pages));
+        section("Paid Order Approvals", approvalPage(dataDir, pages));
+        auto* lookup = new QPushButton("Product lookup", &dialog);
+        titleRow->insertWidget(titleRow->count() - 1, lookup);
+        QObject::connect(lookup, &QPushButton::clicked, &dialog, [&] { openProductLookup(&dialog, dataDir); });
+        auto* print = new QPushButton("Reprint Bill", &dialog);
+        titleRow->insertWidget(titleRow->count() - 1, print);
+        QObject::connect(print, &QPushButton::clicked, &dialog, [&] { reprintBill(&dialog, dataDir); });
         auto* workspace = new QHBoxLayout;
+        workspace->setSpacing(16);
         workspace->addWidget(navigation);
-        workspace->addWidget(pages, 1);
+        auto* pageContent = new QFrame(&dialog);
+        pageContent->setProperty("panel", true);
+        auto* pageLayout = new QVBoxLayout(pageContent);
+        pageLayout->setContentsMargins(12, 12, 12, 12);
+        pageLayout->addWidget(pages);
+        workspace->addWidget(pageContent, 1);
         layout->addLayout(workspace, 1);
 
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);

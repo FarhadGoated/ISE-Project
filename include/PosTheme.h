@@ -40,9 +40,29 @@ inline void applyPosTheme(QApplication& app)
         QLabel[heading="true"], QLabel#scanResult {
             color: #faf7ed; font-size: 16px; font-weight: 600;
         }
-QWidget#posHome QLabel#pageTitle {
-    text-decoration: underline;
-}
+        QWidget#posHome QLabel#pageTitle {
+            text-decoration: underline;
+        }
+        QLabel#cashierRole {
+            color: #d6dfa9; background: #2c3322; border: 1px solid #4b5739;
+            border-radius: 7px; padding: 6px 12px; font-weight: 600;
+        }
+        QFrame#managerAccessCard, QFrame#orderSummary { background: #292d21; }
+        QFrame#payablePanel {
+            background: #353d2a; border: 1px solid #535e41; border-radius: 8px;
+        }
+        QListWidget#managerNavigation {
+            background: #23261c; padding: 5px; outline: none;
+        }
+        QListWidget#managerNavigation::item {
+            border-radius: 5px; padding: 11px 9px;
+        }
+        QListWidget#managerNavigation::item:selected {
+            background: #444e33; color: #f6f4e8;
+        }
+        QListWidget#managerNavigation::item:hover:!selected {
+            background: #31372a;
+        }
         QLabel#pageHeading { color: #faf7ed; font-size: 19px; font-weight: 600; }
         QLabel#managerPinError { color: #f0aba0; }
         QLabel#payableAmount { color: #d6dfa9; font-size: 24px; font-weight: 700; }
@@ -73,6 +93,11 @@ QWidget#posHome QLabel#pageTitle {
         QPushButton[role="tile"] {
             text-align: left; padding: 14px; font-size: 14px; border-radius: 12px;
         }
+        QPushButton#newOrder:enabled {
+            background: #343e27; border-color: #879762; color: #ebf0d6; font-size: 16px;
+        }
+        QPushButton#newOrder:enabled:hover { background: #465334; }
+        QPushButton#newOrder:enabled:pressed { background: #52623d; }
         QPushButton[role="row"] { padding: 5px 8px; margin: 3px; }
         QPushButton[role="remove"] { padding: 5px 8px; margin: 3px; color: #f0aba0; }
         QPushButton:disabled {

@@ -95,7 +95,7 @@ namespace shop {
 
             for (const BillLine& line : bill.lines) {
                 const OrderItem& item = line.item;
-                lines << item.product.name.left(20).leftJustified(20)
+                lines << item.product.acronym.left(20).leftJustified(20)
                     + quantityText(item.quantityMilli).rightJustified(8)
                     + money(item.product.pricePaisa).rightJustified(9)
                     + money(line.amounts.subtotalPaisa).rightJustified(11);
@@ -104,12 +104,8 @@ namespace shop {
             lines << rule();
             lines << twoColumn(QStringLiteral("Subtotal"), money(bill.totals.subtotalPaisa));
             lines << twoColumn(QStringLiteral("Product discount"), money(bill.totals.discountPaisa));
-            lines << twoColumn(QStringLiteral("Seasonal discount (%1%)")
-                .arg(BillCalculator::formatPercentBasisPoints(bill.seasonalBasisPoints)),
-                money(bill.seasonalDiscountPaisa));
-            lines << twoColumn(QStringLiteral("Special discount (%1%)")
-                .arg(BillCalculator::formatPercentBasisPoints(bill.specialBasisPoints)),
-                money(bill.specialDiscountPaisa));
+            lines << twoColumn(QStringLiteral("Seasonal discount"), money(bill.seasonalDiscountPaisa));
+            lines << twoColumn(QStringLiteral("Special discount"), money(bill.specialDiscountPaisa));
             lines << twoColumn(QStringLiteral("Tax"), money(bill.totals.taxPaisa));
             lines << rule();
             lines << twoColumn(QStringLiteral("PAYABLE (PKR)"), money(bill.totals.payablePaisa));
@@ -119,7 +115,7 @@ namespace shop {
             if (!bill.paymentProvider.isEmpty()) {
                 method += QStringLiteral(" - ") + bill.paymentProvider;
             }
-            lines << twoColumn(QStringLiteral("Payment"), method);
+            if (!method.isEmpty()) lines << twoColumn(QStringLiteral("Payment"), method);
             lines << twoColumn(QStringLiteral("Received"), money(bill.amountReceivedPaisa));
             lines << twoColumn(QStringLiteral("Balance returned"), money(bill.balanceReturnedPaisa));
             lines << twoColumn(QStringLiteral("Status"), bill.paymentStatus);

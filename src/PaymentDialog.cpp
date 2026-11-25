@@ -1,4 +1,5 @@
 #include "PaymentDialog.h"
+#include <limits>
 
 #include <QComboBox>
 #include <QDialog>
@@ -84,7 +85,9 @@ namespace shop {
         class PaymentDialog : public QDialog {
         public:
             PaymentDialog(QWidget* parent, qint64 payablePaisa, qint64 alreadyPaidPaisa)
-                : QDialog(parent), payablePaisa_(payablePaisa)
+                : QDialog(parent), payablePaisa_(payablePaisa),
+                  creditPaisa_(qBound<qint64>(0, alreadyPaidPaisa, payablePaisa)),
+                  cashDue_(payablePaisa - creditPaisa_)
             {
                 setWindowTitle(QStringLiteral("Payment"));
 
@@ -123,7 +126,9 @@ namespace shop {
 
                 receivedEdit_ = new QLineEdit(this);
                 receivedEdit_->setPlaceholderText(QStringLiteral("e.g. 500 or 500.50"));
-                form_->addRow(QStringLiteral("Amount received"), receivedEdit_);
+                form_->addRow(alreadyPaidPaisa >= 0 ? QStringLiteral("Additional cash tendered")
+                                                     : QStringLiteral("Amount received"), receivedEdit_);
+                if (!cashDue_) receivedEdit_->setText(QStringLiteral("0.00"));
 
                 changeLabel_ = new QLabel(this);
                 form_->addRow(QStringLiteral("Balance to return"), changeLabel_);
@@ -169,12 +174,12 @@ namespace shop {
 
                 form_->setRowVisible(providerCombo_, needsProvider);
                 form_->setRowVisible(otherEdit_, other);
-                form_->setRowVisible(receivedEdit_, cash);
+                form_->setRowVisible(receivedEdit_, cash && cashDue_ > 0);
 
                 if (cash) {
                     qint64 entered = 0;
-                    if (parsePkr(receivedEdit_->text(), entered) && entered >= payablePaisa_) {
-                        changeLabel_->setText(QStringLiteral("PKR ") + formatPkr(entered - payablePaisa_));
+                    if (parsePkr(receivedEdit_->text(), entered) && entered >= cashDue_) {
+                        changeLabel_->setText(QStringLiteral("PKR ") + formatPkr(entered - cashDue_));
                     }
                     else {
                         changeLabel_->setText(QStringLiteral("-"));
@@ -199,13 +204,16 @@ namespace shop {
                         messageLabel_->setText(QStringLiteral("Enter the amount received, for example 500 or 500.50."));
                         return;
                     }
-                    if (entered < payablePaisa_) {
+                    if (entered < cashDue_) {
                         messageLabel_->setText(QStringLiteral("The amount received must cover PKR %1.")
-                            .arg(formatPkr(payablePaisa_)));
+                            .arg(formatPkr(cashDue_)));
                         return;
                     }
-                    settled.receivedPaisa = entered;
-                    settled.changePaisa = entered - payablePaisa_;
+                    if (entered > std::numeric_limits<qint64>::max() - creditPaisa_) {
+                        messageLabel_->setText("Amount is too large."); return;
+                    }
+                    settled.receivedPaisa = creditPaisa_ + entered;
+                    settled.changePaisa = entered - cashDue_;
                 }
                 else {
                     QString provider = providerCombo_->currentText();
@@ -226,6 +234,8 @@ namespace shop {
             }
 
             qint64 payablePaisa_ = 0;
+            qint64 creditPaisa_ = 0;
+            qint64 cashDue_ = 0;
             QString lastMode_;
             PaymentInput result_;
 

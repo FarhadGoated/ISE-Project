@@ -109,7 +109,7 @@ QString decodeFrame(const QImage& frame, const QRect& region)
     return {};
 }
 
-QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QString&)>& addBarcode)
+QString runScanner(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addBarcode)
 {
     QDialog dialog(parent);
     const QString title = addBarcode ? QStringLiteral("Scan Product") : QStringLiteral("Scan Barcode");
@@ -199,13 +199,14 @@ QString runScanner(QWidget* parent, const std::function<bool(QWidget*, const QSt
         }
 
         QScopedValueRollback<bool> guard(processing, true);
-        const bool added = addBarcode(&dialog, barcode);
+        const QString addedProduct = addBarcode(&dialog, barcode);
+        const bool added = !addedProduct.isEmpty();
         if (added) {
             preview->setAccepted(true);
             flash.start(330);
         }
         status->setText(QStringLiteral("Last scan  %1").arg(barcode));
-        statusDetail->setText(added ? QStringLiteral("Product added to order")
+        statusDetail->setText(added ? QStringLiteral("Added %1").arg(addedProduct)
                                    : QStringLiteral("Product was not added"));
     });
     QTimer::singleShot(0, &dialog, [&] {
@@ -251,7 +252,14 @@ QString scanProductBarcode(QWidget* parent)
 
 void scanOrderBarcodes(QWidget* parent, const std::function<bool(QWidget*, const QString&)>& addBarcode)
 {
-    runScanner(parent, addBarcode);
+    runScanner(parent, [&](QWidget* scanner, const QString& digits) {
+        return addBarcode(scanner,digits) ? digits : QString();
+    });
+}
+
+void scanOrderProducts(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addProduct)
+{
+    runScanner(parent,addProduct);
 }
 
 } // namespace shop

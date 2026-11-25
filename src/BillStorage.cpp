@@ -76,7 +76,9 @@ bool readBill(const QString& dataDir, const QString& id, bool byOrder, Bill& bil
     const bool currentBill = storage.order(saved.orderId, &order) && order.activeBillId == saved.billId;
     const bool canMatchLines = currentBill && order.lines.size() == saved.lines.size();
     ProductCatalog catalog;
-    if (currentBill) {
+    restored.paymentMode = saved.paymentMode;
+    restored.paymentProvider = saved.paymentMerchant;
+    if (currentBill && restored.paymentMode.isEmpty()) {
         restored.paymentMode = order.paymentMode;
         restored.paymentProvider = order.paymentMerchant;
     }

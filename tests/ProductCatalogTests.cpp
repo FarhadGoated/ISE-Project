@@ -198,9 +198,9 @@ static void testQuotingAndFormats()
 
     // Escaped quote and backslash inside a name; quoted path with spaces; leading zeros kept.
     QString e = loadText(
-        "007 001234 \"AB C\" \"Ali \\\"Q\\\" \\\\ Co\" count 1.5 0 0 3 \"my images/001 234.png\" 00 #\n", &c);
+        "007 101234 \"AB C\" \"Ali \\\"Q\\\" \\\\ Co\" count 1.5 0 0 3 \"my images/001 234.png\" 10 #\n", &c);
     CHECK(e.isEmpty());
-    CHECK(c.findByBarcode(QStringLiteral("001234"), p));
+    CHECK(c.findByBarcode(QStringLiteral("101234"), p));
     CHECK(p.id == QStringLiteral("007"));
     CHECK(p.acronym == QStringLiteral("AB C"));
     CHECK(p.name == QStringLiteral("Ali \"Q\" \\ Co"));
@@ -381,11 +381,11 @@ static void testStockAndSerialization()
 
     // Names that need escaping survive the round trip.
     ProductCatalog tricky;
-    CHECK(loadText("007 001234 \"AB C\" \"Ali \\\"Q\\\" \\\\ Co\" count 1.5 0 0 3 \"my images/x.png\" 00 #\n", &tricky).isEmpty());
+    CHECK(loadText("007 101234 \"AB C\" \"Ali \\\"Q\\\" \\\\ Co\" count 1.5 0 0 3 \"my images/x.png\" 10 #\n", &tricky).isEmpty());
     ProductCatalog again;
     CHECK(loadText(tricky.serialize(), &again).isEmpty());
     CHECK(again.serialize() == tricky.serialize());
-    CHECK(again.findByBarcode(QStringLiteral("001234"), p) && p.name == QStringLiteral("Ali \"Q\" \\ Co"));
+    CHECK(again.findByBarcode(QStringLiteral("101234"), p) && p.name == QStringLiteral("Ali \"Q\" \\ Co"));
 
     // Unwritable target is reported, not ignored.
     CHECK(!copy.save(QStringLiteral("/definitely/not/here/Product.txt"), &error));
@@ -459,7 +459,7 @@ static void testManagerFeatures()
     CHECK(!c.addProduct(bad, &error));                         // count with a fraction
     CHECK(c.size() == 3);                                      // nothing half-added
 
-    // updateProduct: other fields change, barcode/category cannot.
+    // Editing a product preserves its ID and updates its barcode index.
     Product edit;
     CHECK(c.findById(QStringLiteral("P001"), edit));
     edit.name = QStringLiteral("Fresh Milk");
@@ -470,8 +470,12 @@ static void testManagerFeatures()
     CHECK(c.products().first().id == QStringLiteral("P001"));  // order unchanged
 
     Product moved = edit;
-    moved.barcode = QStringLiteral("123457");
-    CHECK(!c.updateProduct(moved, &error));
+    moved.barcode = QStringLiteral("990001");
+    moved.categoryId = QStringLiteral("99");
+    CHECK(c.updateProduct(moved, &error));
+    CHECK(!c.findByBarcode(edit.barcode, check));
+    CHECK(c.findByBarcode(moved.barcode, check) && check.id == edit.id);
+    CHECK(c.updateProduct(edit, &error));
     moved = edit;
     moved.categoryId = QStringLiteral("99");
     CHECK(!c.updateProduct(moved, &error));
@@ -511,11 +515,12 @@ static void testCategoryCatalog()
     CategoryCatalog cats;
     CHECK(cats.load(path, &error));
     CHECK(cats.categories().isEmpty());
-    CHECK(cats.nextFreeId() == QStringLiteral("01"));
+    CHECK(cats.nextFreeId() == QStringLiteral("10"));
+    CHECK(!cats.add({QStringLiteral("09"),QStringLiteral("Low"),QStringLiteral("LOW")}, &error));
 
     // Add, reject duplicates and bad values.
     CHECK(cats.add({QStringLiteral("12"), QStringLiteral("Dairy Products"), QStringLiteral("DRY")}, &error));
-    CHECK(cats.add({QStringLiteral("01"), QStringLiteral("Grocery"), QStringLiteral("GRO")}, &error));
+    CHECK(cats.add({QStringLiteral("10"), QStringLiteral("Grocery"), QStringLiteral("GRO")}, &error));
     CHECK(!cats.add({QStringLiteral("12"), QStringLiteral("Other"), QStringLiteral("OTH")}, &error));
     CHECK_CONTAINS(error, "already used");
     CHECK(!cats.add({QStringLiteral("1"), QStringLiteral("X"), QStringLiteral("X")}, &error));
@@ -524,13 +529,13 @@ static void testCategoryCatalog()
     CHECK(!cats.add({QStringLiteral("20"), QString(), QStringLiteral("X")}, &error));
     CHECK(!cats.add({QStringLiteral("20"), QStringLiteral("X"), QString()}, &error));
     CHECK(!cats.add({QStringLiteral("20"), QStringLiteral("X"), QStringLiteral("TOOLONGACR")}, &error));
-    CHECK(cats.nextFreeId() == QStringLiteral("02"));
+    CHECK(cats.nextFreeId() == QStringLiteral("11"));
 
     // Save, check the file text, reload.
     CHECK(cats.save(&error));
     QFile f(path);
     CHECK(f.open(QIODevice::ReadOnly));
-    CHECK(f.readAll() == QByteArray("12 \"Dairy Products\" DRY #\n01 \"Grocery\" GRO #\n"));
+    CHECK(f.readAll() == QByteArray("12 \"Dairy Products\" DRY #\n10 \"Grocery\" GRO #\n"));
     f.close();
 
     CategoryCatalog reloaded;
