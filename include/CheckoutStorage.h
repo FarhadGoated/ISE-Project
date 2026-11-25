@@ -65,6 +65,7 @@ struct OrderRecord {
     QDateTime holdExpiry;       // valid while on-hold
     QDateTime paidAt;           // ORIGINAL payment timestamp, never reset by revisions
     QString activeBillId;
+    int approvedSpecialBasisPoints = 0;
 };
 
 struct BillLine {
@@ -94,6 +95,7 @@ struct BillRecord {
     // BillMeta.txt
     bool    superseded = false;
     QString supersededBy;
+    QString paymentMode, paymentMerchant;
 };
 
 // Everything a report needs about one completed order (page 5, items 5-7).
@@ -169,6 +171,7 @@ public:
     QString nextOrderId(const QDate &date) const;
     QString nextBillId() const;
     Result holdOrder(OrderRecord order, const QDateTime &now);         // new expiry = now + 30 min
+    Result saveDraft(OrderRecord order, const QDateTime& now);
     Result cancelOrder(const QString &orderId);                        // releases the reservation
     SweepResult sweep(const QDateTime &now);                           // expire holds, archive paid
 
@@ -196,6 +199,7 @@ public:
     void setFaultInjection(const QString &fileName, bool alsoFailRecovery = false);
 
 private:
+    Result saveOpenOrder(OrderRecord order, const QDateTime& now, bool reserve);
     struct FileImage { QString name; QByteArray bytes; };
     Result commitAll(const QMap<QString, OrderRecord> &orders,
                      const QMap<QString, BillRecord> &bills,
@@ -226,6 +230,9 @@ struct CheckoutDetails {
     QString customerName, customerContact, paymentMode, merchantName;
     QString status = QStringLiteral("paid");
     qint64 paymentPaisa = 0;
+    QString orderId;             // Empty for a new sale
+    QString expectedBillId;      // Active bill approved for this revision
+    store::OrderRecord previous; // Snapshot opened for editing
 };
 
 struct CheckoutReceipt {
@@ -235,6 +242,10 @@ struct CheckoutReceipt {
 
 class CheckoutStorage {
 public:
+    static bool saveCart(const QString& dataDir, const Order& cart, const QString& customer,
+                         const QString& contact, const store::OrderRecord& previous,
+                         bool reserve, int approvedSpecialBasisPoints, QString& error);
+    static bool cancelCart(const QString& dataDir, const store::OrderRecord& previous, QString& error);
     static bool save(const QString& dataDir, const Bill& bill,
                      const CheckoutDetails& details, const QDateTime& now,
                      CheckoutReceipt& receipt, QString* error = nullptr);
