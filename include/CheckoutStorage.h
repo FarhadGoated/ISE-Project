@@ -6,6 +6,8 @@
 // in three storage-owned side files so the required text rows are never changed.
 #pragma once
 
+#include "Bill.h"
+
 #include <QDateTime>
 #include <QHash>
 #include <QList>
@@ -138,7 +140,7 @@ public:
 
     // ---- loading ----
     // Missing files mean a fresh start. Malformed records are skipped and reported
-    // with file name and line number in loadErrors().
+    // with file name and line number in loadErrors(). Load errors lock writes.
     bool load();
     const QStringList &loadErrors() const { return m_loadErrors; }
 
@@ -164,6 +166,7 @@ public:
     QHash<QString, qint64> soldQuantities() const;                     // active completed orders only
 
     // ---- lifecycle operations (each is one coordinated commit) ----
+    QString nextOrderId(const QDate &date) const;
     QString nextBillId() const;
     Result holdOrder(OrderRecord order, const QDateTime &now);         // new expiry = now + 30 min
     Result cancelOrder(const QString &orderId);                        // releases the reservation
@@ -215,3 +218,25 @@ private:
 };
 
 } // namespace store
+
+// Entry point used by the current cashier window.
+
+namespace shop {
+struct CheckoutDetails {
+    QString customerName, customerContact, paymentMode, merchantName;
+    QString status = QStringLiteral("paid");
+    qint64 paymentPaisa = 0;
+};
+
+struct CheckoutReceipt {
+    QString orderId, billId;
+    bool recoveryRequired = false;
+};
+
+class CheckoutStorage {
+public:
+    static bool save(const QString& dataDir, const Bill& bill,
+                     const CheckoutDetails& details, const QDateTime& now,
+                     CheckoutReceipt& receipt, QString* error = nullptr);
+};
+}
