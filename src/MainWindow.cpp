@@ -693,13 +693,19 @@ namespace shop {
                 refresh();
                 return true;
                 };
-            QObject::connect(scan, &QPushButton::clicked, &dialog, [&] {
+            const auto scanCart = [&] {
                 scanOrderProducts(&dialog, [&](QWidget* scanner, const QString& digits) {
                     QString name;
                     return addProduct(scanner, digits, &name) ? name : QString();
-                    });
-                barcode->setFocus();
+                }, [&] {
+                    QList<ScanCartLine> lines;
+                    for (const auto& item : order.items())
+                        lines.append(ScanCartLine{item.product.name, quantityText(item.product, item.quantityMilli)});
+                    return lines;
                 });
+                barcode->setFocus();
+            };
+            QObject::connect(scan, &QPushButton::clicked, &dialog, scanCart);
             QObject::connect(barcode, &QLineEdit::textChanged, &dialog, [&] {
                 enter->setEnabled(barcode->hasAcceptableInput());
                 });
@@ -747,7 +753,7 @@ namespace shop {
                     QMessageBox::warning(&dialog, "Generate Bill", error); return;
                 }
                 PaymentInput payment;
-                if (!shop::collectPayment(&dialog, bill.totals.payablePaisa,
+                if (!shop::collectPayment(&dialog, order, bill,
                     revision ? prior.paymentPaisa : -1, payment)) return;
                 const auto now = QDateTime::currentDateTime();
                 if (billDate != now.date()) {
@@ -792,6 +798,7 @@ namespace shop {
 
             refresh();
             barcode->setFocus();
+            if (!existing) QTimer::singleShot(0, &dialog, scanCart);
             dialog.exec();
         }
 

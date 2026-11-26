@@ -7,6 +7,8 @@
 #include <QDialog>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
+#include <QTableWidget>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPalette>
@@ -109,13 +111,14 @@ QString decodeFrame(const QImage& frame, const QRect& region)
     return {};
 }
 
-QString runScanner(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addBarcode)
+QString runScanner(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addBarcode,
+                   const std::function<QList<ScanCartLine>()>& cartLines = {})
 {
     QDialog dialog(parent);
     const QString title = addBarcode ? QStringLiteral("Scan Product") : QStringLiteral("Scan Barcode");
     dialog.setWindowTitle(title);
     dialog.setObjectName(QStringLiteral("scannerDialog"));
-    dialog.resize(710, 485);
+    dialog.resize(cartLines ? 1000 : 710, 500);
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(20, 18, 20, 18);
     layout->setSpacing(12);
@@ -140,13 +143,65 @@ QString runScanner(QWidget* parent, const std::function<QString(QWidget*, const 
     statusDetail->setMinimumHeight(statusDetail->fontMetrics().height());
     feedback->addWidget(status);
     feedback->addWidget(statusDetail);
-    auto* close = new QPushButton(QStringLiteral("Close"), footer);
+    auto* close = new QPushButton(cartLines ? QStringLiteral("Back to Cart") : QStringLiteral("Close"), footer);
+    close->setAutoDefault(false);
+    statusDetail->setTextFormat(Qt::PlainText);
+    statusDetail->setWordWrap(true);
     close->setObjectName(QStringLiteral("closeScanner"));
     footerLayout->addLayout(feedback, 1);
     footerLayout->addWidget(close);
     layout->addWidget(heading);
     layout->addWidget(instruction);
-    layout->addWidget(preview, 1);
+    auto* body = new QHBoxLayout;
+    body->setSpacing(14);
+    body->addWidget(preview, 1);
+    QTableWidget* cartTable = nullptr;
+    QLabel* cartHeading = nullptr;
+    QLabel* emptyCart = nullptr;
+    if (cartLines) {
+        auto* panel = new QFrame(&dialog);
+        panel->setProperty("panel", true);
+        panel->setMinimumWidth(265);
+        auto* side = new QVBoxLayout(panel);
+        side->setContentsMargins(12, 10, 12, 12);
+        cartHeading = new QLabel(panel);
+        cartHeading->setProperty("heading", true);
+        side->addWidget(cartHeading);
+        cartTable = new QTableWidget(0, 2, panel);
+        cartTable->setHorizontalHeaderLabels({QStringLiteral("Product"), QStringLiteral("Quantity")});
+        cartTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        cartTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        cartTable->verticalHeader()->hide();
+        cartTable->verticalHeader()->setDefaultSectionSize(34);
+        cartTable->setSelectionMode(QAbstractItemView::NoSelection);
+        cartTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        cartTable->setAlternatingRowColors(true);
+        cartTable->setShowGrid(false);
+        side->addWidget(cartTable, 1);
+        emptyCart = new QLabel(QStringLiteral("Scan a product to start the cart."), panel);
+        emptyCart->setProperty("muted", true);
+        emptyCart->setWordWrap(true);
+        side->addWidget(emptyCart);
+        body->addWidget(panel);
+    }
+    const auto refreshCart = [&] {
+        if (!cartTable) return;
+        const auto lines = cartLines();
+        cartHeading->setText(QStringLiteral("Current Cart (%1)").arg(lines.size()));
+        emptyCart->setVisible(lines.isEmpty());
+        cartTable->setRowCount(lines.size());
+        for (qsizetype index = 0; index < lines.size(); ++index) {
+            const auto& line = lines.at(index);
+            auto* product = new QTableWidgetItem(line.product);
+            product->setToolTip(line.product);
+            cartTable->setItem(index, 0, product);
+            auto* quantity = new QTableWidgetItem(line.quantity);
+            quantity->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            cartTable->setItem(index, 1, quantity);
+        }
+    };
+    refreshCart();
+    layout->addLayout(body, 1);
     layout->addWidget(footer);
 
     QVideoSink sink;
@@ -204,6 +259,7 @@ QString runScanner(QWidget* parent, const std::function<QString(QWidget*, const 
         if (added) {
             preview->setAccepted(true);
             flash.start(330);
+            refreshCart();
         }
         status->setText(QStringLiteral("Last scan  %1").arg(barcode));
         statusDetail->setText(added ? QStringLiteral("Added %1").arg(addedProduct)
@@ -257,9 +313,10 @@ void scanOrderBarcodes(QWidget* parent, const std::function<bool(QWidget*, const
     });
 }
 
-void scanOrderProducts(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addProduct)
+void scanOrderProducts(QWidget* parent, const std::function<QString(QWidget*, const QString&)>& addProduct,
+                       const std::function<QList<ScanCartLine>()>& cartLines)
 {
-    runScanner(parent,addProduct);
+    runScanner(parent, addProduct, cartLines);
 }
 
 } // namespace shop
